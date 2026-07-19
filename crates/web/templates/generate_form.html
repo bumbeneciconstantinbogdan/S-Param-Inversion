@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Generate Data{% endblock %}
+{% block content %}
+<h1>Generate Synthetic Data</h1>
+
+<div class="card">
+  <form hx-post="/generate" hx-target="#result" hx-swap="innerHTML">
+
+    <h3 style="margin:0 0 0.5rem;">Bulk grid (train/val/test)</h3>
+    <div class="form-grid">
+      <div>
+        <label for="grid_nx">Grid points (eps')</label>
+        <input type="number" id="grid_nx" name="grid_nx" value="200" min="2" max="4000">
+      </div>
+      <div>
+        <label for="grid_ny">Grid points (eps'')</label>
+        <input type="number" id="grid_ny" name="grid_ny" value="100" min="2" max="4000">
+      </div>
+      <div>
+        <label for="eps_prime_min">eps' min</label>
+        <input type="number" id="eps_prime_min" name="eps_prime_min" value="1.0" step="0.1">
+      </div>
+      <div>
+        <label for="eps_prime_max">eps' max</label>
+        <input type="number" id="eps_prime_max" name="eps_prime_max" value="200.0" step="0.1">
+      </div>
+      <div>
+        <label for="eps_secund_min">eps'' min</label>
+        <input type="number" id="eps_secund_min" name="eps_secund_min" value="0.0" step="0.1">
+      </div>
+      <div>
+        <label for="eps_secund_max">eps'' max</label>
+        <input type="number" id="eps_secund_max" name="eps_secund_max" value="100.0" step="0.1">
+      </div>
+    </div>
+
+    <h3 style="margin:1rem 0 0.5rem;">Dense low-ε patch (overlay on the bulk grid)</h3>
+    <p style="font-size:11px; color:#64748b; margin:0 0 0.5rem;">
+      Concentrates samples in the near-vacuum corner
+      (<code>ε' ∈ [1, 2.5], ε'' ∈ [0, 1.75]</code>) where NRW is most singular.
+      Set 0 to disable.  winning recipe uses <code>train=8</code>,
+      <code>val/test=5</code>.
+    </p>
+    <div class="form-grid">
+      <div>
+        <label for="train_patch_nx">Train patch points (eps')</label>
+        <input type="number" id="train_patch_nx" name="train_patch_nx" value="8" min="0" max="200">
+      </div>
+      <div>
+        <label for="train_patch_ny">Train patch points (eps'')</label>
+        <input type="number" id="train_patch_ny" name="train_patch_ny" value="8" min="0" max="200">
+      </div>
+      <div>
+        <label for="eval_patch_nx">Val/Test patch points (eps')</label>
+        <input type="number" id="eval_patch_nx" name="eval_patch_nx" value="5" min="0" max="200">
+      </div>
+      <div>
+        <label for="eval_patch_ny">Val/Test patch points (eps'')</label>
+        <input type="number" id="eval_patch_ny" name="eval_patch_ny" value="5" min="0" max="200">
+      </div>
+    </div>
+
+    <h3 style="margin:1rem 0 0.5rem;">Optional: Dense test grid (stress-test eval)</h3>
+    <p style="font-size:11px; color:#64748b; margin:0 0 0.5rem;">
+      When ANY of these are non-zero, the route generates a SECOND grid
+      whose bulk train output replaces the dataset's test split.  Lets
+      you stress-test on a grid 100× denser than train without paying
+      for a 16M-row training set.  Leave at 0 to use the standard
+      (bulk-derived) test grid.  Heads-up: 2000×1000 + 80×80 = ~2M test
+      points, ~1 GB of dataset_samples rows; allow a minute to write.
+    </p>
+    <div class="form-grid">
+      <div>
+        <label for="dense_test_grid_nx">Test bulk grid (eps')</label>
+        <input type="number" id="dense_test_grid_nx" name="dense_test_grid_nx" value="0" min="0" max="4000">
+      </div>
+      <div>
+        <label for="dense_test_grid_ny">Test bulk grid (eps'')</label>
+        <input type="number" id="dense_test_grid_ny" name="dense_test_grid_ny" value="0" min="0" max="4000">
+      </div>
+      <div>
+        <label for="dense_test_patch_nx">Test patch points (eps')</label>
+        <input type="number" id="dense_test_patch_nx" name="dense_test_patch_nx" value="0" min="0" max="200">
+      </div>
+      <div>
+        <label for="dense_test_patch_ny">Test patch points (eps'')</label>
+        <input type="number" id="dense_test_patch_ny" name="dense_test_patch_ny" value="0" min="0" max="200">
+      </div>
+    </div>
+
+    <div style="margin-top:1rem; padding:0.5rem 0.75rem; background:#fef9c3;
+                border-left:3px solid #ca8a04; font-size:11px; color:#713f12;">
+      <b>Stress-test preset</b> — fills bulk 200×100 + 8×8 train patch
+      and dense test 2000×1000 + 80×80 (the same dataset Run 10 was scored on):
+      <button type="button"
+              onclick="(function(){
+                var s = (n,v) => { var e=document.getElementsByName(n)[0]; if(e){e.value=v;} };
+                s('grid_nx',200); s('grid_ny',100);
+                s('eps_prime_min',1.0); s('eps_prime_max',200.0);
+                s('eps_secund_min',0.0); s('eps_secund_max',100.0);
+                s('train_patch_nx',8); s('train_patch_ny',8);
+                s('eval_patch_nx',5); s('eval_patch_ny',5);
+                s('dense_test_grid_nx',2000); s('dense_test_grid_ny',1000);
+                s('dense_test_patch_nx',80); s('dense_test_patch_ny',80);
+              })()"
+              style="margin-left:0.5rem; padding:0.15rem 0.6rem; font-size:11px;
+                     background:#ca8a04; color:white; border:none;
+                     border-radius:3px; cursor:pointer;">
+        Load Stress-test preset
+      </button>
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="margin-top:0.75rem">Generate Dataset</button>
+  </form>
+</div>
+
+<div id="result"></div>
+{% endblock %}

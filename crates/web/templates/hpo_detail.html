@@ -1,0 +1,669 @@
+{% extends "base.html" %}
+{% block title %}HPO: {{ study.name }}{% endblock %}
+{% block content %}
+<h1>HPO Study: {{ study.name }}</h1>
+
+<div class="card">
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="metric">
+        {% if study.status == "completed" %}<span class="success">{{ study.status }}</span>
+        {% else if study.status == "running" %}<span class="warning">{{ study.status }}</span>
+        {% else %}<span class="error-msg">{{ study.status }}</span>{% endif %}
+      </div>
+      <div class="metric-label">Status</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ study.model_type }}</div>
+      <div class="metric-label">Model Type</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="hpo-progress-count">{{ study.n_completed }}/{{ study.n_trials }}</div>
+      <div class="metric-label">Trials</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="hpo-feasible">{{ study.n_feasible }}</div>
+      <div class="metric-label">Feasible</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ study.pareto_size }}</div>
+      <div class="metric-label">Pareto Front</div>
+    </div>
+    {% match study.total_time_secs %}{% when Some with (t) %}
+    <div class="metric-box">
+      <div class="metric">{{ t }}s</div>
+      <div class="metric-label">Duration</div>
+    </div>
+    {% when None %}{% endmatch %}
+  </div>
+
+  {% if study.status == "running" %}
+  <div class="progress-bar" style="margin-top:0.5rem;">
+    <div class="progress-fill" id="hpo-progress-fill" style="width:{{ study.n_completed * 100 / study.n_trials }}%"></div>
+  </div>
+  <div id="hpo-status" style="margin-top:0.5rem;"></div>
+  {% endif %}
+
+  {% if !best_trial_summary.is_empty() %}
+  <p style="margin-top:0.5rem; font-size:12px; color:var(--text-secondary);">Best: {{ best_trial_summary }}</p>
+  {% endif %}
+</div>
+
+{% if study.status == "running" %}
+<div class="card">
+  <h2>Live Pareto Front</h2>
+  <p style="margin:0 0 0.5rem; color:var(--text-muted); font-size:11px;">
+    All three objectives, streamed as each trial completes. 3D by
+    default; click a 2D button to flatten to any pair. Pareto flags
+    are assigned after the study finishes — until then every feasible
+    trial is plotted as a regular point.
+  </p>
+  <div id="pareto-chart"></div>
+</div>
+<script>
+(function() {
+  if (typeof window.ParetoChart === 'undefined') return;
+  var total = {{ study.n_trials }};
+  var feasibleCount = {{ study.n_feasible }};
+
+  var chart = window.ParetoChart.create(
+    document.getElementById('pareto-chart'), [], {
+      height: 340,
+      initialView: '3d',
+      filenamePrefix: 'pareto_live',
+    });
+
+  var es = new EventSource('/hpo/{{ study.id }}/sse');
+  es.addEventListener('trial', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      if (d.trial == null) return;
+      var el = document.getElementById('hpo-progress-fill');
+      if (el) el.style.width = (d.trial / total * 100).toFixed(0) + '%';
+      var pc = document.getElementById('hpo-progress-count');
+      if (pc) pc.textContent = d.trial + '/' + total;
+      if (d.is_feasible) feasibleCount++;
+      var fc = document.getElementById('hpo-feasible');
+      if (fc) fc.textContent = feasibleCount;
+      chart.addTrial({
+        trial_number: d.trial,
+        model_type: d.model_type,
+        ok: (d.ok_at_1pct != null) ? d.ok_at_1pct : null,
+        param_count: (d.param_count != null) ? d.param_count : null,
+        max_error: (d.max_error != null && isFinite(d.max_error)) ? d.max_error : null,
+        is_feasible: !!d.is_feasible,
+        is_pareto: false,
+      });
+    } catch(err) {}
+  });
+  es.addEventListener('complete', function() {
+    es.close();
+    var st = document.getElementById('hpo-status');
+    if (st) st.innerHTML = '<div class="card" style="border-color:var(--ok);margin-top:0.5rem;"><p class="success">Complete! <a href="/hpo/{{ study.id }}">Refresh for analysis</a></p></div>';
+  });
+  es.addEventListener('hpo_error', function(e) { es.close(); });
+  es.onerror = function() { setTimeout(function() { if (es.readyState !== EventSource.OPEN) es.close(); }, 5000); };
+})();
+</script>
+{% endif %}
+
+{% if !importance_groups.is_empty() %}
+<div class="card">
+  <h2>Parameter Importance (fANOVA — per objective)</h2>
+  <p style="margin:0 0 0.75rem; color:var(--text-muted); font-size:11px;">
+    Main-effect variance ratios from <code>Study::fanova()</code>
+    (optimizer crate, unaltered), computed <b>separately for each
+    NSGA-III objective</b> — OK@1%, param count, and max error.
+    Longer bar = that hyperparameter explains more variance of
+    <em>that</em> objective across trials. The final
+    <code>(interactions)</code> bar (grey, dashed) is the aggregate
+    variance explained by <em>pairs</em> (and higher orders) of
+    parameters acting together — fANOVA normalises so
+    <code>Σ main_effects + Σ interactions = 100%</code>. A large
+    interactions bar means the objective is driven by
+    hyperparameter <em>combinations</em>, not by any single knob.
+    Typical ranges in this project: <code>param_count</code> is
+    low-interaction (~20%, dominated by <code>hidden_size</code>);
+    <code>ok_at_1pct</code> and <code>max_error</code> are
+    mid-to-high (~40–55%). Legacy studies — and the Spearman
+    fallback above ~2k trials — have no interactions data and omit
+    the bar.
+  </p>
+  {% for g in importance_groups %}
+    <div style="margin-bottom:1rem;">
+      <h3 style="margin:0 0 0.5rem; font-size:13px;">
+        {% if g.model_type.is_empty() %}All trials{% else %}{{ g.model_type }} MLP{% endif %}
+      </h3>
+      {% for obj in g.objectives %}
+        <div style="margin:0 0 0.75rem;">
+          <div style="font-size:11px; color:var(--text-muted); margin:0 0 0.25rem;">
+            Objective: <b>{{ obj.objective_label }}</b>
+          </div>
+          <div id="importance-chart-{{ g.model_type }}-{{ obj.objective }}"
+               data-model-type="{{ g.model_type }}"
+               data-objective="{{ obj.objective }}"></div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+</div>
+<script>
+(function() {
+  if (typeof Plotly === 'undefined') return;
+
+  // One Plotly chart per (model_type, objective) pair. Each section
+  // is a single horizontal bar trace sorted by descending importance.
+  // We avoid cross-section chart synchronization deliberately — the
+  // three objectives often have very different dominant parameters,
+  // so a shared y-axis would waste space on zero-importance rows.
+  var sections = [
+    {% for g in importance_groups %}
+      {% for obj in g.objectives %}
+        {
+          model_type: '{{ g.model_type }}',
+          objective: '{{ obj.objective }}',
+          pairs: [
+            {% for imp in obj.entries %}
+            { name: '{{ imp.name }}',
+              score: parseFloat('{{ imp.importance }}'.replace('%','')) },
+            {% endfor %}
+          ],
+          // fANOVA interaction residual as a percentage number, or
+          // `null` when the backend had no data (legacy study /
+          // Spearman fallback / sub-threshold). Rendered as a
+          // separate grey bar pinned to the bottom of the chart so
+          // the full 100% always visualises.
+          interactions: {% match obj.interactions_pct %}{% when Some with (v) %}{{ v }}{% when None %}null{% endmatch %},
+        },
+      {% endfor %}
+    {% endfor %}
+  ];
+
+  var palette = {
+    'real':    '#2563eb',
+    'complex': '#7c3aed',
+    '':        '#334155',
+  };
+
+  sections.forEach(function(s) {
+    var node = document.getElementById(
+      'importance-chart-' + s.model_type + '-' + s.objective);
+    if (!node) return;
+    // Descending score → reverse so the most important row is at the
+    // top of the horizontal bar chart.
+    var names = s.pairs.map(function(p) { return p.name; }).reverse();
+    var scores = s.pairs.map(function(p) { return p.score; }).reverse();
+
+    // Interactions bar pinned to the BOTTOM of the y-axis (first
+    // entry after reverse) so the reader sees "Σ main_effects +
+    // interactions = 100%" as a visual closure rather than a mystery
+    // gap. Skip entirely when the backend reported no interactions
+    // data (Spearman fallback / legacy study / sub-threshold).
+    var hasInteractions = s.interactions !== null && s.interactions !== undefined;
+    if (hasInteractions) {
+      names.unshift('(interactions)');
+      scores.unshift(s.interactions);
+    }
+
+    var rowCount = hasInteractions ? names.length : names.length;
+    var chart_height = Math.max(160, rowCount * 22 + 40);
+    node.style.height = chart_height + 'px';
+
+    // Separate the interactions row into its own trace so we can
+    // colour it distinctly (grey, dashed pattern) without touching
+    // the main-effect palette. Two-trace pattern keeps Plotly's
+    // default per-bar coloring off.
+    var mainNames = hasInteractions ? names.slice(1) : names;
+    var mainScores = hasInteractions ? scores.slice(1) : scores;
+    var mainColor = palette[s.model_type] || '#334155';
+
+    var traces = [
+      {
+        y: mainNames,
+        x: mainScores,
+        type: 'bar',
+        orientation: 'h',
+        marker: { color: mainColor },
+        hovertemplate: '%{y}: %{x:.2f}%<extra>main effect</extra>',
+        text: mainScores.map(function(v) { return v > 0 ? v.toFixed(1) + '%' : ''; }),
+        textposition: 'outside',
+        name: 'main effects',
+      }
+    ];
+    if (hasInteractions) {
+      traces.push({
+        y: ['(interactions)'],
+        x: [s.interactions],
+        type: 'bar',
+        orientation: 'h',
+        marker: {
+          color: 'rgba(107,114,128,0.55)',   // slate-500 at ~55%
+          pattern: { shape: '/', size: 6, solidity: 0.35 },
+          line: { color: 'rgba(55,65,81,0.75)', width: 1 },
+        },
+        hovertemplate: '(interactions): %{x:.2f}%<extra>pairwise + higher-order</extra>',
+        text: [s.interactions.toFixed(1) + '%'],
+        textposition: 'outside',
+        name: 'interactions',
+      });
+    }
+
+    Plotly.newPlot(node, traces, {
+      xaxis: { title: { text: '% variance explained' }, automargin: true },
+      yaxis: { automargin: true, tickfont: { size: 11 } },
+      margin: { t: 10, r: 60, b: 40, l: 10 },
+      font: { family: "'JetBrains Mono', monospace", size: 11 },
+      showlegend: false,
+      bargap: 0.25,
+      barmode: 'group',
+    }, {
+      responsive: true,
+      displaylogo: false,
+      toImageButtonOptions: {
+        format: 'png',
+        filename: 'fanova_' + s.model_type + '_' + s.objective,
+        scale: 2,
+      },
+      modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+    });
+  });
+})();
+</script>
+{% endif %}
+
+{% if !trials.is_empty() %}
+<div class="card">
+  <h2>Pareto Front</h2>
+  {% if study.status != "running" %}
+  <p style="margin:0 0 0.5rem; color:var(--text-muted); font-size:11px;">
+    Three NSGA-III objectives at once. Default is the 3D view; the
+    buttons switch to any 2D projection in one click. Click a point
+    to jump to its row in the trial table.
+  </p>
+  <div id="pareto-detail"></div>
+  <script>
+  (function() {
+    if (typeof window.ParetoChart === 'undefined') return;
+
+    var trials = [];
+    {% for t in trials %}
+    {% match t.objectives_json %}{% when Some with (o) %}
+    (function() {
+      try {
+        var obj = JSON.parse('{{ o|safe }}');
+        // objectives = [ok_at_1pct, param_count, max_error]
+        // NSGA-III directions: [Maximize, Minimize, Minimize].
+        var ok = obj[0], paramCount = obj[1], maxErr = obj[2];
+        var params = {};
+        try { params = JSON.parse('{{ t.params_json|safe }}'); } catch(e) {}
+        var mtype = '{{ t.model_type }}';
+        var maxErrStr = (maxErr != null && isFinite(maxErr))
+          ? ' max_err=' + Number(maxErr).toFixed(2) + '%' : '';
+        var label = '#{{ t.trial_number }} [' + mtype + '] params=' + paramCount
+          + maxErrStr
+          + ' H=' + (params.hidden_size != null ? params.hidden_size : '-')
+          + ' ' + (params.activation||'') + '/' + (params.optimizer||'');
+        trials.push({
+          trial_number: {{ t.trial_number }},
+          model_type: mtype,
+          ok: ok,
+          param_count: paramCount,
+          max_error: (maxErr != null && isFinite(maxErr)) ? maxErr : null,
+          is_feasible: {{ t.is_feasible }},
+          is_pareto: {{ t.is_pareto }},
+          label: label,
+        });
+      } catch(e) {}
+    })();
+    {% when None %}{% endmatch %}
+    {% endfor %}
+
+    window.ParetoChart.create(document.getElementById('pareto-detail'), trials, {
+      height: 460,
+      initialView: '3d',
+      filenamePrefix: 'pareto_front',
+      onTrialClick: function(trialNum) {
+        var row = document.getElementById('trial-row-' + trialNum);
+        if (row) {
+          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          row.style.background = '#e0e7ff';
+          setTimeout(function() { row.style.background = ''; }, 2000);
+        }
+      },
+    });
+  })();
+  </script>
+  {% endif %}
+</div>
+
+{% if !pareto_entries.is_empty() %}
+<div class="card">
+  <h2>Pareto Front Configurations ({{ pareto_entries.len() }})</h2>
+  <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr><th>Type</th><th>Trial</th><th>OK@1%</th><th>Params</th><th>Hidden</th><th>Val Loss</th><th>Max Err</th><th>LR</th><th>Activation</th><th>Optimizer</th></tr>
+      </thead>
+      <tbody>
+        {% for p in pareto_entries %}
+        <tr>
+          {% if p.model_type == "real" %}
+          <td style="color:#1d4ed8; font-weight:600;">R</td>
+          {% else if p.model_type == "complex" %}
+          <td style="color:#6d28d9; font-weight:600;">C</td>
+          {% else %}
+          <td>{{ p.model_type }}</td>
+          {% endif %}
+          <td>{{ p.trial }}</td>
+          <td>{{ p.ok_at_1pct }}%</td>
+          <td>{{ p.param_count }}</td>
+          <td>{{ p.hidden_size }}</td>
+          <td>{{ p.val_loss }}</td>
+          <td>{{ p.max_error }}%</td>
+          <td>{{ p.lr }}</td>
+          <td>{{ p.activation }}</td>
+          <td>{{ p.optimizer }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>All Trials ({{ trials.len() }})</h2>
+  <div style="max-height:500px; overflow-y:auto;">
+    <table id="trials-table">
+      <thead>
+        {# `Loss` (the loss-function name — `mse`, `smooth_l1`, etc.) is
+           distinct from `Val Loss` (the numeric validation loss after
+           training). Without the dedicated column the only place to see
+           the loss function was the trial detail popup, where it sat
+           under a row labeled just `loss` — easy to confuse with
+           `val loss`. The column header below disambiguates them at the
+           table level. #}
+        <tr><th>#</th><th>Type</th><th>Status</th><th>Pareto</th><th>OK@1%</th><th>Params</th><th>H</th><th>Loss</th><th>Val Loss</th><th>Max Err</th><th>Activation</th><th>Optimizer</th><th>LR</th><th>Batch</th></tr>
+      </thead>
+      <tbody>
+        {% for t in trials %}
+        <tr id="trial-row-{{ t.trial_number }}" class="trial-row" data-trial="{{ t.trial_number }}" data-model-type="{{ t.model_type }}" data-params='{{ t.params_json }}' data-metrics='{% match t.metrics_json %}{% when Some with (m) %}{{ m }}{% when None %}{}{% endmatch %}' data-objectives='{% match t.objectives_json %}{% when Some with (o) %}{{ o }}{% when None %}[]{% endmatch %}' data-feasible="{{ t.is_feasible }}" data-pareto="{{ t.is_pareto }}" style="cursor:pointer;">
+          <td>{{ t.trial_number }}</td>
+          <td style="font-size:10px;">{% if t.model_type == "complex" %}<span style="color:#7c3aed;">C</span>{% else %}<span style="color:#334155;">R</span>{% endif %}</td>
+          <td>{% if t.status == "completed" %}<span class="success">OK</span>{% else %}<span class="error-msg">{{ t.status }}</span>{% endif %}</td>
+          <td>{% if t.is_pareto %}<span class="success" style="font-weight:700;">&#9733;</span>{% else if t.is_feasible %}{% else %}<span style="color:#a3a3a3;">&#10007;</span>{% endif %}</td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            {% match t.metrics_json %}{% when Some with (m) %}
+            <script>document.currentScript.parentElement.textContent = (function(){ try { return JSON.parse('{{ m|safe }}').ok_at_1pct.toFixed(1) + '%'; } catch(e) { return '-'; } })();</script>
+            {% when None %}-{% endmatch %}
+          </td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            {% match t.metrics_json %}{% when Some with (m) %}
+            <script>document.currentScript.parentElement.textContent = (function(){ try { var v = JSON.parse('{{ m|safe }}').param_count; return v != null ? v : '-'; } catch(e) { return '-'; } })();</script>
+            {% when None %}-{% endmatch %}
+          </td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            <script>document.currentScript.parentElement.textContent = (function(){ try { return JSON.parse('{{ t.params_json|safe }}').hidden_size || '-'; } catch(e) { return '-'; } })();</script>
+          </td>
+          <td style="font-size:11px;">
+            <script>document.currentScript.parentElement.textContent = (function(){ try { return JSON.parse('{{ t.params_json|safe }}').loss || '-'; } catch(e) { return '-'; } })();</script>
+          </td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            {% match t.metrics_json %}{% when Some with (m) %}
+            <script>document.currentScript.parentElement.textContent = (function(){ try { var v = JSON.parse('{{ m|safe }}').val_loss; return v != null ? v.toFixed(6) : '-'; } catch(e) { return '-'; } })();</script>
+            {% when None %}-{% endmatch %}
+          </td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            {% match t.metrics_json %}{% when Some with (m) %}
+            <script>document.currentScript.parentElement.textContent = (function(){ try { var v = JSON.parse('{{ m|safe }}').max_error; return v != null ? v.toFixed(1) + '%' : '-'; } catch(e) { return '-'; } })();</script>
+            {% when None %}-{% endmatch %}
+          </td>
+          <td style="font-size:11px;">
+            <script>document.currentScript.parentElement.textContent = (function(){ try { return JSON.parse('{{ t.params_json|safe }}').activation || '-'; } catch(e) { return '-'; } })();</script>
+          </td>
+          <td style="font-size:11px;">
+            <script>document.currentScript.parentElement.textContent = (function(){ try { return JSON.parse('{{ t.params_json|safe }}').optimizer || '-'; } catch(e) { return '-'; } })();</script>
+          </td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            <script>document.currentScript.parentElement.textContent = (function(){ try { var v = JSON.parse('{{ t.params_json|safe }}').lr; return v != null ? v.toExponential(2) : '-'; } catch(e) { return '-'; } })();</script>
+          </td>
+          <td style="font-family:var(--font-mono);font-size:11px;">
+            <script>document.currentScript.parentElement.textContent = (function(){ try { return JSON.parse('{{ t.params_json|safe }}').train_batch_size || '-'; } catch(e) { return '-'; } })();</script>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Trial detail popup -->
+<div id="trial-detail-popup" class="card" style="display:none; position:fixed; bottom:1rem; right:1rem; width:440px; max-height:70vh; overflow-y:auto; z-index:100; box-shadow:0 4px 24px rgba(0,0,0,0.15); border:2px solid var(--accent);">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+    <h2 id="trial-detail-title" style="margin:0;"></h2>
+    <button onclick="document.getElementById('trial-detail-popup').style.display='none'" class="btn btn-sm">&times;</button>
+  </div>
+  <div id="trial-detail-body" style="font-size:12px;"></div>
+  <a id="trial-train-link" href="#" class="btn btn-primary" style="margin-top:0.75rem; display:block; text-align:center;">Train with these parameters</a>
+</div>
+
+<script>
+var __studyConfig = {{ study_config_json|safe }};
+var __studyModelType = '{{ study.model_type }}';
+var __studyDatasetId = {{ dataset_id }};
+
+// Mapping from HPO serde names to train form values
+// Maps from serde JSON keys to train form values
+// ActivationChoice: serde rename_all="snake_case"
+var __activationMap = {relu:'relu',gelu:'gelu',tanh:'tanh',leaky_relu:'leaky_relu',elu:'elu'};
+// ActivationChoice (snake_case) → complex activation (train form)
+var __complexActivationMap = {relu:'crelu',gelu:'cgelu',tanh:'cardioid',leaky_relu:'crelu',elu:'modrelu'};
+// NormChoice: serde rename_all="snake_case"
+var __normMap = {none:'none',layer_norm:'layernorm',batch_norm:'batchnorm'};
+var __complexNormMap = {none:'none',layer_norm:'layernorm',batch_norm:'batchnorm'};
+// LossChoice: serde rename_all="snake_case"
+var __lossMap = {mse:'mse',smooth_l1:'smooth_l1',eps_rel_mse:'eps_rel_mse',physics_forward:'physics_forward',pi_mape:'physics_forward'};
+// SchedulerChoice: serde rename_all="snake_case"
+var __schedulerMap = {none:'none',cosine:'cosine',plateau:'plateau'};
+// BatchSizeChoice: per-variant serde rename
+var __batchMap = {'8':'8','16':'16','32':'32','64':'64','128':'128','256':'256','512':'512','ALL':'all'};
+// OptimizerChoice: no serde rename (PascalCase)
+var __optimizerMap = {Adam:'adam',AdamW:'adamw',SGD:'sgd',RMSprop:'rmsprop'};
+
+function mapVal(map, val) { return map[val] || (typeof val === 'string' ? val.toLowerCase() : val); }
+
+// Click trial row → show detail popup
+document.querySelectorAll('.trial-row').forEach(function(row) {
+  row.addEventListener('click', function() {
+    var trialNum = this.dataset.trial;
+    var trialModelType = this.dataset.modelType || 'real';
+    var isComplex = trialModelType === 'complex';
+    var params = {};
+    var metrics = {};
+    var objectives = [];
+    try { params = JSON.parse(this.dataset.params); } catch(e) {}
+    try { metrics = JSON.parse(this.dataset.metrics); } catch(e) {}
+    try { objectives = JSON.parse(this.dataset.objectives); } catch(e) {}
+    var isPareto = this.dataset.pareto === 'true';
+    var isFeasible = this.dataset.feasible === 'true';
+
+    var typeLabel = trialModelType === 'complex' ? '<span style="color:#7c3aed; font-size:11px;">Complex</span>' : '<span style="color:#334155; font-size:11px;">Real</span>';
+    var title = 'Trial #' + trialNum + ' ' + typeLabel;
+    if (isPareto) title += ' <span class="success" style="font-size:11px;">&#9733; Pareto</span>';
+    else if (isFeasible) title += ' <span style="font-size:11px; color:var(--text-muted);">Feasible</span>';
+    else title += ' <span class="error-msg" style="font-size:11px;">Infeasible</span>';
+
+    var html = '<table style="width:100%; font-size:11px;">';
+
+    // Architecture & Hyperparameters
+    html += '<tr style="border-bottom:2px solid var(--text);"><th colspan="2" style="text-align:left; padding:0.2rem 0;">Architecture & Hyperparameters</th></tr>';
+    var paramOrder = ['hidden_size','activation','optimizer','lr','weight_decay','train_batch_size','dropout_p','norm','loss','grad_clip_norm','input_noise_std','scheduler'];
+    paramOrder.forEach(function(key) {
+      if (params[key] !== undefined && params[key] !== null) {
+        var val = params[key];
+        if (typeof val === 'number' && key === 'lr') val = val.toExponential(3);
+        else if (typeof val === 'number' && !Number.isInteger(val)) val = val.toPrecision(4);
+        var label = key.replace(/_/g,' ');
+        // For complex trials, the activation value is already the complex
+        // name sampled by HPO (crelu / cgelu / cardioid / modrelu /
+        // hybrid_cardioid_gelu / lpma / cswish_phase).
+        if (isComplex && key === 'activation') {
+          label = 'complex activation';
+        }
+        if (isComplex && key === 'norm') {
+          val = mapVal(__complexNormMap, val);
+          label = 'complex norm';
+        }
+        // `loss` is the residual function family (mse / smooth_l1 /
+        // physics_forward / …). Renamed to `loss function` so it
+        // can't be visually confused with the `val loss` metric a
+        // few rows down — both used to read just `loss` in this
+        // popup.
+        if (key === 'loss') {
+          label = 'loss function';
+        }
+        html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">' + label + '</td><td style="font-family:var(--font-mono);">' + val + '</td></tr>';
+      }
+    });
+    // Loss-specific sub-params (currently only `physics_lambda` for
+    // the hybrid PINN). Indented under `loss function` above.
+    if (params.loss_params) {
+      var lp = params.loss_params;
+      ['physics_lambda'].forEach(function(key) {
+        if (lp[key] !== undefined && lp[key] !== null) {
+          var val = lp[key];
+          if (typeof val === 'number') val = val.toExponential(3);
+          html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">  ' + key.replace(/_/g,' ') + '</td><td style="font-family:var(--font-mono);">' + val + '</td></tr>';
+        }
+      });
+    }
+    // Scheduler sub-params
+    if (params.scheduler_params) {
+      var sp = params.scheduler_params;
+      ['cosine_eta_min','plateau_factor','plateau_patience','plateau_min_lr'].forEach(function(key) {
+        if (sp[key] !== undefined && sp[key] !== null) {
+          html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">  ' + key.replace(/_/g,' ') + '</td><td style="font-family:var(--font-mono);">' + sp[key] + '</td></tr>';
+        }
+      });
+    }
+
+    // Training config (from study-level settings)
+    html += '<tr style="border-bottom:2px solid var(--text);"><th colspan="2" style="text-align:left; padding:0.4rem 0 0.2rem;">Training Config (study-level)</th></tr>';
+    html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">max epochs (HPO)</td><td style="font-family:var(--font-mono);">' + (__studyConfig.max_epochs || '-') + '</td></tr>';
+    html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">patience</td><td style="font-family:var(--font-mono);">' + (__studyConfig.patience || '-') + '</td></tr>';
+    html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">warmup epochs</td><td style="font-family:var(--font-mono);">' + (__studyConfig.warmup_epochs || '-') + '</td></tr>';
+
+    // Metrics
+    if (Object.keys(metrics).length > 0) {
+      html += '<tr style="border-bottom:2px solid var(--text);"><th colspan="2" style="text-align:left; padding:0.4rem 0 0.2rem;">Metrics</th></tr>';
+      ['ok_at_1pct','val_loss','max_error','param_count','training_time_secs'].forEach(function(key) {
+        if (metrics[key] !== undefined && metrics[key] !== null) {
+          var val = metrics[key];
+          if (key === 'ok_at_1pct') val = val.toFixed(1) + '%';
+          else if (key === 'max_error') val = val.toFixed(2) + '%';
+          else if (key === 'val_loss') val = val.toFixed(6);
+          else if (key === 'training_time_secs') val = val.toFixed(2) + 's';
+          html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">' + key.replace(/_/g,' ') + '</td><td style="font-family:var(--font-mono);">' + val + '</td></tr>';
+        }
+      });
+    }
+
+    // Objectives
+    if (objectives.length > 0) {
+      html += '<tr style="border-bottom:2px solid var(--text);"><th colspan="2" style="text-align:left; padding:0.4rem 0 0.2rem;">Objectives</th></tr>';
+      html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">OK@1%</td><td style="font-family:var(--font-mono);">' + (objectives[0] != null ? objectives[0].toFixed(1) + '%' : '-') + '</td></tr>';
+      html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">Param Count</td><td style="font-family:var(--font-mono);">' + (objectives[1] != null ? objectives[1] : '-') + '</td></tr>';
+      html += '<tr><td style="color:var(--text-secondary); padding:0.15rem 0.3rem;">Max Error</td><td style="font-family:var(--font-mono);">' + (objectives[2] != null ? Number(objectives[2]).toFixed(2) + '%' : '-') + '</td></tr>';
+    }
+
+    html += '</table>';
+
+    document.getElementById('trial-detail-title').innerHTML = title;
+    document.getElementById('trial-detail-body').innerHTML = html;
+
+    // Retrain prefill — reproduces the HPO trial bit-for-bit by
+    // default. Every budget-shaping knob (`max_epochs`, `patience`,
+    // `warmup_epochs`) is copied from the HPO study config so the
+    // retrain run's early-stopping path matches the trial's exactly;
+    // mismatched budgets were the main reason retrains diverged from
+    // the reported `max_error` (the Trainer restores whichever epoch
+    // has the best val_loss, and a larger budget can discover a
+    // *later* best epoch with different weights → different
+    // test-set max_error on the restored weights). The user can edit
+    // `max_epochs` upward in the training form afterward when the
+    // goal is "train longer for deployment" rather than "reproduce
+    // the HPO trial".
+    var mapGradClipToF64 = function(val) {
+      if (val === undefined || val === null || val === 'None' || val === 'none') return null;
+      var n = parseFloat(val);
+      return isNaN(n) ? null : n;
+    };
+    var schedulerParams = params.scheduler_params || {};
+    var optimizerParams = params.optimizer_params || {};
+    var lossParams      = params.loss_params      || {};
+
+    var reproSeed = (parseInt(__studyConfig.seed, 10) || 42) + (parseInt(trialNum, 10) || 0);
+    var prefill = {
+      dataset_id: __studyDatasetId,
+      model_type: trialModelType,
+      hidden_size: params.hidden_size,
+      optimizer: mapVal(__optimizerMap, params.optimizer),
+      lr: params.lr,
+      weight_decay: params.weight_decay,
+      batch_size: mapVal(__batchMap, params.train_batch_size),
+      loss: mapVal(__lossMap, params.loss),
+      scheduler: mapVal(__schedulerMap, params.scheduler),
+      max_epochs: __studyConfig.max_epochs || 25,
+      patience: __studyConfig.patience || 20,
+      warmup_epochs: __studyConfig.warmup_epochs || 10,
+      seed: reproSeed,
+      // Study's base seed (shared by every trial) drives the shuffle.
+      shuffle_seed: parseInt(__studyConfig.seed, 10) || 42,
+      grad_clip_norm: mapGradClipToF64(params.grad_clip_norm),
+      input_noise_std: params.input_noise_std != null ? params.input_noise_std : null,
+      cosine_eta_min: schedulerParams.cosine_eta_min != null ? schedulerParams.cosine_eta_min : null,
+      plateau_factor: schedulerParams.plateau_factor != null ? schedulerParams.plateau_factor : null,
+      plateau_patience: schedulerParams.plateau_patience != null ? schedulerParams.plateau_patience : null,
+      plateau_min_lr: schedulerParams.plateau_min_lr != null ? schedulerParams.plateau_min_lr : null,
+      sgd_momentum: optimizerParams.sgd_momentum != null ? optimizerParams.sgd_momentum : null,
+      sgd_nesterov: optimizerParams.sgd_nesterov != null ? optimizerParams.sgd_nesterov : null,
+      rmsprop_momentum: optimizerParams.rmsprop_momentum != null ? optimizerParams.rmsprop_momentum : null,
+      rmsprop_alpha: optimizerParams.rmsprop_alpha != null ? optimizerParams.rmsprop_alpha : null,
+      // Legacy PI-MAPE β — kept on the prefill for strict round-trip
+      // compat with pre-existing DB rows that still record a sampled
+      // β value. New PhysicsForward trials sample `physics_lambda`
+      // instead (below).
+      pi_mape_beta: params.pi_mape_beta != null ? params.pi_mape_beta : null,
+      // Hybrid-PINN mixing weight: HPO-sampled λ from `log [1e-3, 1]`
+      // when the trial picked `physics_forward`. `null` for MSE /
+      // SmoothL1 trials (the field is ignored by the loss factory in
+      // that case). Reads from both the new `loss_params.physics_lambda`
+      // path and the legacy top-level `physics_lambda` (some early
+      // serialisations may have used that shape).
+      physics_lambda: lossParams.physics_lambda != null
+        ? lossParams.physics_lambda
+        : (params.physics_lambda != null ? params.physics_lambda : null),
+    };
+    if (isComplex) {
+      // Complex MLPs now carry dropout (pair-wise) alongside the
+      // activation — grad-clip / input noise are already copied above.
+      // Normalization remains Real-only.
+      prefill.complex_activation = params.activation;
+      prefill.dropout = params.dropout_p || 0;
+    } else {
+      // Activation is already the real name (relu/gelu/tanh/leaky_relu/elu)
+      prefill.activation = params.activation;
+      prefill.norm = mapVal(__normMap, params.norm);
+      prefill.dropout = params.dropout_p || 0;
+    }
+    var trainUrl = '/train?prefill=' + encodeURIComponent(JSON.stringify(prefill));
+    document.getElementById('trial-train-link').href = trainUrl;
+
+    document.getElementById('trial-detail-popup').style.display = 'block';
+  });
+});
+</script>
+{% endif %}
+
+<a href="/hpo" class="btn btn-secondary" style="margin-top:0.5rem">Back to HPO</a>
+{% endblock %}

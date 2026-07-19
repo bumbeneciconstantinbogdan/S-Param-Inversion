@@ -1,0 +1,21 @@
+[package]
+name = "sparam-models"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+sparam-core = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+serde_json = { workspace = true }
+# `varmap` enables `sparam_core::determinism` (used by tests for
+# reproducible re-init).  Hosting the utility in `sparam-core`
+# rather than re-exporting it through `sparam-training` keeps a
+# single source of truth and breaks the prior dev-dep cycle
+# `models[dev-dep] -> training -> models[dep]`.
+sparam-core = { workspace = true, features = ["testing", "varmap"] }

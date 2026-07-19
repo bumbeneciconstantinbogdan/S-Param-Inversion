@@ -1,0 +1,583 @@
+{% extends "base.html" %}
+{% block title %}Train Model{% endblock %}
+{% block content %}
+<h1>Train Model</h1>
+
+{% if datasets.is_empty() %}
+<div class="card" style="color:#64748b; text-align:center; padding:2rem;">
+  No datasets available. <a href="/generate">Generate one first</a>.
+</div>
+{% else %}
+<div class="card" x-data="trainForm()">
+  <!-- Reproduction banner: shown only when the form was prefilled via
+       the HPO detail page's "Retrain from trial" link. Makes the
+       reproduction guarantee (same epochs, same seed, same shuffle_seed,
+       same data split) explicit, and surfaces the one edit the user
+       would need to make for deployment-length training. -->
+  <div id="hpo-repro-banner"
+       style="display:none; margin-bottom:0.75rem; padding:0.6rem 0.8rem;
+              background:#eef6ff; border-left:3px solid #2563eb;
+              font-size:11px; color:#1e3a8a;">
+    <b>Reproduction mode</b> — this form was prefilled from an HPO
+    trial. Every field (including <code>max_epochs</code>,
+    <code>patience</code>, <code>warmup_epochs</code>,
+    <code>seed</code>, and the dataset) matches the trial's original
+    run exactly, so the resulting <code>max_error</code> should
+    reproduce the HPO trial's reported value to bit-for-bit
+    precision. Adjust <code>max_epochs</code> upward before
+    submitting if you want to train longer for deployment instead of
+    reproducing the trial.
+  </div>
+  <form hx-post="/train" hx-target="#training-area" hx-swap="innerHTML">
+
+    <!-- winning recipe shortcuts.  Two presets (Complex h=48 and
+         Real h=64) so the user picks the family they want; each
+         button switches model_type, fills every architecture / regulariser
+         / optimiser / scheduler / stacked pipeline field for that family from
+         poster/studies/methodology/configs/m10_winner_recipe.json
+         (+ real_best.json for the Real path).  The form's blanket
+         defaults (lr=0.001, batch=64, weight_decay=0.01) are ~12x off
+         the HPO-tuned recipe values and won't reproduce the methodology
+         study's <10% max_err / >90% ok@1 finding without these. -->
+    <div style="margin-bottom:0.75rem; padding:0.5rem 0.75rem;
+                background:#fef9c3; border-left:3px solid #ca8a04;
+                font-size:11px; color:#713f12;">
+      <b>Stack presets</b> — one click fills every field for the
+      methodology study's winning recipe in each family.
+      <div style="margin-top:0.4rem; display:flex; gap:0.4rem; flex-wrap:wrap;">
+        <button type="button" id="load-stack-complex-btn"
+                onclick="loadM10Recipe('complex')"
+                style="padding:0.2rem 0.7rem; font-size:11px;
+                       background:#6d28d9; color:white; border:none;
+                       border-radius:3px; cursor:pointer;">
+          Complex h=48 (worelu + eps_rel_mse)
+        </button>
+        <button type="button" id="load-stack-real-btn"
+                onclick="loadM10Recipe('real')"
+                style="padding:0.2rem 0.7rem; font-size:11px;
+                       background:#1d4ed8; color:white; border:none;
+                       border-radius:3px; cursor:pointer;">
+          Real h=64 (relu + eps_rel_mse)
+        </button>
+        <span id="m10-load-status" style="align-self:center; font-style:italic;"></span>
+      </div>
+    </div>
+
+    <h2>Dataset</h2>
+    <select name="dataset_id">
+      {% for d in datasets %}
+      <option value="{{ d.id }}">Dataset #{{ d.id }} ({{ d.train_samples }} train, {{ d.val_samples }} val)</option>
+      {% endfor %}
+    </select>
+
+    <h2>Model Architecture</h2>
+    <div class="radio-group">
+      <label><input type="radio" name="model_type" value="real" x-model="modelType" checked> Real MLP</label>
+      <label><input type="radio" name="model_type" value="complex" x-model="modelType"> Complex MLP</label>
+    </div>
+
+    <div class="form-grid">
+      <div>
+        <label for="hidden_size">Hidden size</label>
+        <input type="number" id="hidden_size" name="hidden_size" value="64" min="8" max="512">
+      </div>
+      <div>&nbsp;</div>
+    </div>
+
+    <div x-show="modelType === 'real'">
+      <h3>Real MLP Options</h3>
+      <div class="form-grid">
+        <div>
+          <label for="activation">Activation</label>
+          <select id="activation" name="activation">
+            <option value="gelu" selected>GELU</option>
+            <option value="relu">ReLU</option>
+            <option value="silu">SiLU (Swish)</option>
+            <option value="selu">SELU</option>
+            <option value="tanh">Tanh</option>
+            <option value="sigmoid">Sigmoid</option>
+            <option value="leaky_relu">Leaky ReLU</option>
+            <option value="elu">ELU</option>
+          </select>
+        </div>
+        <div>
+          {# Normalization stays Real-only — Complex MLP has no
+             norm layer. Hidden on the Complex path via the outer
+             `x-show="modelType === 'real'"`, so the submitted form
+             carries at most one `name="norm"` value. #}
+          <label for="norm">Normalization</label>
+          <select id="norm" name="norm">
+            <option value="none" selected>None</option>
+            <option value="layernorm">LayerNorm</option>
+            <option value="batchnorm">BatchNorm</option>
+            <option value="fused_layernorm">Fused LayerNorm</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div x-show="modelType === 'complex'">
+      <h3>Complex MLP Options</h3>
+      <p style="font-size:0.78rem; color:var(--text-secondary); margin:0 0 0.5rem;">
+        Per-half LayerNorm and the architectural softplus output clamp
+        are <em>always on</em> for the Complex MLP — they're not a
+        toggle. Dropout, gradient clipping and input noise apply through
+        the Regularization section below.
+      </p>
+      <div class="form-grid">
+        <div>
+          <label for="complex_activation">Complex Activation</label>
+          <select id="complex_activation" name="complex_activation">
+            <option value="hybrid_cardioid_gelu" selected>Hybrid Cardioid-GELU (learnable)</option>
+            <option value="cgelu">CGELU (polar)</option>
+            <option value="cardioid">Cardioid</option>
+            <option value="crelu">CReLU (split-real ReLU)</option>
+            <option value="modrelu">ModReLU (per-feature bias, learnable)</option>
+            <option value="lpma">LPMA (mag + phase bias, learnable)</option>
+            <option value="cswish_phase">CSwish-Phase (learnable α)</option>
+            <option value="worelu">Worelu (phase-windowed ReLU, learnable b/θ/k — winning recipe)</option>
+          </select>
+        </div>
+        <div>&nbsp;</div>
+      </div>
+    </div>
+
+    <h3>Regularization</h3>
+    <div class="form-grid">
+      <div>
+        {# `dropout` is shared: Real applies it after the activation
+           per-element, Complex applies it pair-wise (whole (real,
+           imag) pairs). Single `<input>` so the submitted form
+           always carries exactly one `name="dropout"` value. #}
+        <label for="dropout">Dropout probability</label>
+        <input type="text" id="dropout" name="dropout" value="0.0" inputmode="decimal" placeholder="0.0">
+      </div>
+      <div>
+        {# Grad clipping lives in the optimizer-agnostic trainer
+           step, same code path for both model types. Empty → no
+           clipping (server-side `empty_string_as_none` maps `""` to
+           `None`). Replaces the earlier hidden HPO-parity input. #}
+        <label for="grad_clip_norm">Max grad norm
+          <span style="color:#64748b;font-weight:400;font-size:0.78rem">(blank = off)</span>
+        </label>
+        <input type="text" id="grad_clip_norm" name="grad_clip_norm" inputmode="decimal" placeholder="e.g. 1.0">
+      </div>
+      <div>
+        <label for="input_noise_std">Input noise σ
+          <span style="color:#64748b;font-weight:400;font-size:0.78rem">(Gaussian added to [Re, Im] input)</span>
+        </label>
+        <input type="text" id="input_noise_std" name="input_noise_std" inputmode="decimal" placeholder="e.g. 0.005">
+      </div>
+      <div>&nbsp;</div>
+    </div>
+
+    <h2>Optimizer</h2>
+    <div class="form-grid">
+      <div>
+        <label for="optimizer">Optimizer</label>
+        <select id="optimizer" name="optimizer">
+          <option value="adamw" selected>AdamW</option>
+          <option value="adam">Adam</option>
+          <option value="sgd">SGD</option>
+          <option value="rmsprop">RMSprop</option>
+        </select>
+      </div>
+      <div>
+        <label for="lr">Learning rate</label>
+        <input type="text" id="lr" name="lr" value="0.001" inputmode="decimal">
+      </div>
+      <div>
+        <label for="weight_decay">Weight decay</label>
+        <input type="text" id="weight_decay" name="weight_decay" value="0.01" inputmode="decimal">
+      </div>
+      <div>
+        <label for="scheduler">LR Scheduler</label>
+        <select id="scheduler" name="scheduler">
+          <option value="cosine" selected>Cosine Annealing</option>
+          <option value="plateau">Reduce on Plateau</option>
+          <option value="none">None (constant LR)</option>
+        </select>
+      </div>
+    </div>
+
+    <h2>Training</h2>
+    <div class="form-grid">
+      <div>
+        <label for="max_epochs">Max epochs</label>
+        <input type="number" id="max_epochs" name="max_epochs" value="200" min="1" max="10000">
+      </div>
+      <div>
+        <label for="batch_size">Batch size</label>
+        <select id="batch_size" name="batch_size">
+          <option value="16">16 (winner)</option>
+          <option value="32">32</option>
+          <option value="64" selected>64</option>
+          <option value="128">128</option>
+          <option value="256">256</option>
+          <option value="all">All</option>
+        </select>
+      </div>
+      <div>
+        <label for="patience">Early stopping patience</label>
+        <input type="number" id="patience" name="patience" value="20" min="1" max="1000">
+      </div>
+      <div>
+        <label for="warmup_epochs">Warmup epochs</label>
+        <input type="number" id="warmup_epochs" name="warmup_epochs" value="10" min="0" max="1000">
+      </div>
+      <div>
+        <label for="loss">Loss function</label>
+        {# Strict partition — Real MLP sees the three shape-agnostic
+           losses; Complex MLP sees only `physics_forward` (NRW
+           forward-model S-parameter MSE). Alpine `x-if` drops the
+           hidden `<optgroup>` from the DOM entirely, so the native
+           `<select>` can never submit a value the server would
+           reject. #}
+        <select id="loss" name="loss" x-model="loss">
+          <template x-if="modelType === 'real'">
+            <optgroup label="Real MLP">
+              <option value="mse">MSE</option>
+              <option value="smooth_l1">Smooth L1 / Huber</option>
+              <option value="eps_rel_mse">ε-relative MSE (scale-robust)</option>
+            </optgroup>
+          </template>
+          <template x-if="modelType === 'complex'">
+            <optgroup label="Complex MLP">
+              <option value="mse">Complex MSE</option>
+              <option value="smooth_l1">Complex Smooth L1 / Huber</option>
+              <option value="eps_rel_mse">ε-relative MSE (scale-robust — winning recipe)</option>
+              <option value="physics_forward">Physics-forward (hybrid PINN)</option>
+            </optgroup>
+          </template>
+        </select>
+      </div>
+      <div x-show="modelType === 'complex' && loss === 'physics_forward'">
+        <label for="physics_lambda">Physics weight λ
+          <span style="color:#64748b;font-weight:400;font-size:0.78rem">(hybrid PINN: L = base + λ · NRW residual; HPO range 1e-3..1)</span>
+        </label>
+        <input type="text" id="physics_lambda" name="physics_lambda" value="0.001" inputmode="decimal" placeholder="0.001">
+      </div>
+      <div>
+        <label for="seed">Random seed
+          <span style="color:#64748b;font-weight:400;font-size:0.78rem">(same seed → same weights, batches, dropout)</span>
+        </label>
+        <input type="number" id="seed" name="seed" value="42" min="0" max="4294967295">
+      </div>
+    </div>
+
+    {# HPO-parity hidden inputs: URL-prefilled from the HPO detail
+       page's "Retrain from trial" flow. Empty when no prefill.
+       `grad_clip_norm` and `input_noise_std` used to live here too —
+       they're now visible inputs in the Regularization section above
+       (still submitted with the same field names, same server-side
+       `empty_string_as_none` mapping). #}
+    <input type="hidden" name="shuffle_seed">
+    <input type="hidden" name="cosine_eta_min">
+    <input type="hidden" name="plateau_factor">
+    <input type="hidden" name="plateau_patience">
+    <input type="hidden" name="plateau_min_lr">
+    <input type="hidden" name="sgd_momentum">
+    <input type="hidden" name="sgd_nesterov">
+    <input type="hidden" name="rmsprop_momentum">
+    <input type="hidden" name="rmsprop_alpha">
+
+    {# ─────────────────────────────────────────────────────────────────
+       stacked pipeline toggles — opt-in interventions on top of the base
+       training run.  When all four are at defaults the stack is a
+       passthrough and training behaves identically to before.  See the
+       `methodology/M10_tail_sweep.tex` chapter for the per-stage
+       rationale and the recipe that hits 7/7 joint feasibility on
+       both Real and Complex pipelines at matched parameter budget.
+       ───────────────────────────────────────────────────────────────── #}
+    <fieldset style="margin-top:1.25rem; padding:0.75rem 1rem; border:1px solid #d4d4d4; border-radius:6px;">
+      <legend style="font-weight:600; padding:0 0.5rem; color:#1c1c1e">stacked pipeline (opt-in)</legend>
+      <p style="font-size:0.85rem; color:#64748b; margin:0.25rem 0 0.75rem">
+        Each toggle is independent — set any subset.  Defaults below mirror
+        the winning recipe (overlay 8, ensemble 3, refinement 100).
+        Leave at zero / one to disable.
+      </p>
+      <div class="row">
+        <div>
+          <label for="m10_train_overlay_density">Train-overlay density</label>
+          <input type="number" id="m10_train_overlay_density" name="m10_train_overlay_density"
+                 value="0" min="0" max="200" step="1">
+          <span style="font-size:0.78rem; color:#64748b">N×N near-vacuum patch synthesised at training time. 0 = off. winning sweet spot: 8.</span>
+        </div>
+        <div>
+          <label for="m10_ensemble_size">Median-ensemble size</label>
+          <input type="number" id="m10_ensemble_size" name="m10_ensemble_size"
+                 value="1" min="1" max="9" step="1">
+          <span style="font-size:0.78rem; color:#64748b">Train N models with seeds (S, S+1, …); take the per-element median. 1 = single model. winning sweet spot: 3 (smallest odd N).</span>
+        </div>
+      </div>
+      <div class="row" style="margin-top:0.5rem">
+        <div>
+          <label for="m10_refine_steps">NRW refinement steps</label>
+          <input type="number" id="m10_refine_steps" name="m10_refine_steps"
+                 value="0" min="0" max="2000" step="10">
+          <span style="font-size:0.78rem; color:#64748b">Adam steps that minimise |NRW(ε̂) − S|² in physical space, starting from the MLP prediction. 0 = off. winning sweet spot: 100.</span>
+        </div>
+        <div>
+          <label for="m10_refine_lr">Refinement learning rate</label>
+          <input type="number" id="m10_refine_lr" name="m10_refine_lr"
+                 value="0.001" min="0" max="1" step="0.0001">
+          <span style="font-size:0.78rem; color:#64748b">Adam lr for the refinement loop. Ignored when refinement steps = 0.</span>
+        </div>
+      </div>
+    </fieldset>
+
+    <button type="submit" class="btn btn-primary" style="margin-top:1rem">Start Training</button>
+  </form>
+</div>
+{% endif %}
+
+<div id="training-area"></div>
+
+<script>
+// Alpine component for the train form.
+// Reads ?prefill=<json> from URL to set model type BEFORE Alpine renders,
+// so x-show directives work correctly from the first frame.
+function trainForm() {
+  var prefill = null;
+  try {
+    var raw = new URL(window.location.href).searchParams.get('prefill');
+    if (raw) prefill = JSON.parse(raw);
+  } catch(e) {}
+
+  // Per-model-type loss partition — mirrors
+  // `sparam_hpo::LossChoice::{REAL,COMPLEX}_COMPATIBLE`. Kept in
+  // sync with the server-side enum so the UI can never submit a
+  // combination the backend would reject. Legacy `pi_mape` persists
+  // in older DB rows — accept it as an alias that round-trips to
+  // the new `physics_forward` value.
+  var REAL_LOSSES    = ['mse', 'smooth_l1', 'eps_rel_mse'];
+  // `eps_rel_mse` is the winning recipe for complex; the loss runs
+  // in physical ε-space using `complex_relative_error_elements`, same
+  // residual the metric scores on.
+  var COMPLEX_LOSSES = ['mse', 'smooth_l1', 'eps_rel_mse', 'physics_forward'];
+  function normalizeLoss(loss) {
+    return (loss === 'pi_mape' || loss === 'pimape') ? 'physics_forward' : loss;
+  }
+  function defaultLossFor(modelType) {
+    return modelType === 'complex' ? 'mse' : 'mse';
+  }
+  function validLossFor(modelType, loss) {
+    return (modelType === 'complex' ? COMPLEX_LOSSES : REAL_LOSSES).indexOf(loss) !== -1;
+  }
+
+  var initialModelType = (prefill && prefill.model_type) || 'real';
+  var initialLoss = normalizeLoss((prefill && prefill.loss) || defaultLossFor(initialModelType));
+  if (!validLossFor(initialModelType, initialLoss)) {
+    initialLoss = defaultLossFor(initialModelType);
+  }
+
+  return {
+    modelType: initialModelType,
+    // Loss is bound via `x-model` on the `<select>`. Flipping model
+    // type resets to the type's default since the two sets are
+    // disjoint (MSE on Complex or physics_forward on Real would be
+    // rejected server-side).
+    loss: initialLoss,
+    init: function() {
+      this.$watch('modelType', function(newType) {
+        if (!validLossFor(newType, this.loss)) {
+          this.loss = defaultLossFor(newType);
+        }
+      });
+
+      if (!prefill) return;
+      var p = prefill;
+      var self = this;
+
+      // Show the reproduction-mode banner: the presence of `prefill`
+      // is the signal that the form arrived via the HPO "Retrain from
+      // trial" flow, not a from-scratch train.
+      var banner = document.getElementById('hpo-repro-banner');
+      if (banner) banner.style.display = 'block';
+
+      // Helper to set a form field by name
+      function set(name, val) {
+        if (val === undefined || val === null) return;
+        var el = document.querySelector('[name="' + name + '"]');
+        if (!el) return;
+        if (el.tagName === 'SELECT') {
+          for (var i = 0; i < el.options.length; i++) {
+            if (el.options[i].value === String(val)) { el.selectedIndex = i; return; }
+          }
+        } else {
+          el.value = val;
+        }
+      }
+
+      // Set the radio button for form submission
+      var radio = document.querySelector('input[name="model_type"][value="' + self.modelType + '"]');
+      if (radio) radio.checked = true;
+
+      set('dataset_id', p.dataset_id);
+      set('hidden_size', p.hidden_size);
+      set('optimizer', p.optimizer);
+      if (p.lr != null) set('lr', p.lr);
+      if (p.weight_decay != null) set('weight_decay', p.weight_decay);
+      set('batch_size', p.batch_size);
+      // `loss` is bound via `x-model` — writing to `self.loss` keeps
+      // Alpine, the native `<select>` and the submitted value in sync.
+      if (p.loss) self.loss = p.loss;
+      set('scheduler', p.scheduler);
+      if (p.max_epochs != null) set('max_epochs', p.max_epochs);
+      if (p.patience != null) set('patience', p.patience);
+      if (p.warmup_epochs != null) set('warmup_epochs', p.warmup_epochs);
+      if (p.seed != null) set('seed', p.seed);
+
+      // Real model fields
+      if (p.activation) set('activation', p.activation);
+      if (p.norm) set('norm', p.norm);
+      if (p.dropout != null) set('dropout', p.dropout);
+
+      // Complex model fields
+      if (p.complex_activation) set('complex_activation', p.complex_activation);
+
+      // HPO-parity hidden inputs.
+      if (p.shuffle_seed != null) set('shuffle_seed', p.shuffle_seed);
+      if (p.grad_clip_norm != null) set('grad_clip_norm', p.grad_clip_norm);
+      if (p.input_noise_std != null) set('input_noise_std', p.input_noise_std);
+      if (p.cosine_eta_min != null) set('cosine_eta_min', p.cosine_eta_min);
+      if (p.plateau_factor != null) set('plateau_factor', p.plateau_factor);
+      if (p.plateau_patience != null) set('plateau_patience', p.plateau_patience);
+      if (p.plateau_min_lr != null) set('plateau_min_lr', p.plateau_min_lr);
+      if (p.sgd_momentum != null) set('sgd_momentum', p.sgd_momentum);
+      if (p.sgd_nesterov != null) set('sgd_nesterov', p.sgd_nesterov);
+      if (p.rmsprop_momentum != null) set('rmsprop_momentum', p.rmsprop_momentum);
+      if (p.rmsprop_alpha != null) set('rmsprop_alpha', p.rmsprop_alpha);
+      // `pi_mape_beta` was the legacy PI-MAPE β weight — silently
+      // dropped on retrain (the new hybrid PINN uses `physics_lambda`
+      // below).
+      // Hybrid-PINN λ is now a real per-trial knob: HPO samples it,
+      // the prefill carries it through `loss_params.physics_lambda`,
+      // and the visible Physics-weight input keeps it in sync with
+      // the form submission. Only meaningful when `loss == 'physics_forward'`.
+      if (p.physics_lambda != null) set('physics_lambda', p.physics_lambda);
+    }
+  };
+}
+
+// One-click "winning recipe" loader.  Family-aware: complex picks
+// h=48 + worelu + eps_rel_mse from m10_winner_recipe.json; real picks
+// h=64 + leaky_relu + eps_rel_mse (M10 intervention on top of the
+// real_best.json baseline).  Both populate every field including the
+// stacked pipeline toggles, so the user just hits Submit.
+//
+// Two subtleties matter here:
+//  1. Alpine's `modelType` reactive store is driven by `change` events
+//     on the radio (not `click`), so we EXPLICITLY dispatch one — and
+//     fall back to writing through Alpine.$data() for hardness.  Without
+//     this, the conditional `<div x-show="modelType === '…'">` panels
+//     stay frozen on whatever was visible before, and the form looks
+//     broken even though the *submitted* model_type is correct.
+//  2. We sync the family BEFORE setting per-family fields like
+//     `complex_activation` / `activation` so the visibility-controlled
+//     selects are mounted by the time we write to them.
+function loadM10Recipe(family) {
+  if (family !== 'real' && family !== 'complex') family = 'complex';
+
+  function set(name, value) {
+    var el = document.querySelector('[name="' + name + '"]');
+    if (!el) return;
+    el.value = String(value);
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Step 1 — switch model family AND sync Alpine.  Two layers of belt
+  // + braces because Alpine 3 won't pick up a programmatic `.click()`
+  // on a radio without an explicit `change` event.
+  var radio = document.querySelector('input[name="model_type"][value="' + family + '"]');
+  if (!radio) return;
+  radio.checked = true;
+  radio.dispatchEvent(new Event('input',  { bubbles: true }));
+  radio.dispatchEvent(new Event('change', { bubbles: true }));
+  // Last-resort sync: write directly into Alpine's reactive store on
+  // the form's x-data root.  Wrapped in try/catch so an Alpine API
+  // change can't break the rest of the loader.
+  try {
+    var root = document.querySelector('[x-data^="trainForm"]');
+    if (root && window.Alpine && window.Alpine.$data) {
+      window.Alpine.$data(root).modelType = family;
+    }
+  } catch (e) { /* harmless — events above already did the work */ }
+
+  // Step 2 — fields shared between families (everything except the
+  // family-specific activation / loss / norm).
+  // Regularisation (winner — HPO-tuned values, NOT form defaults).
+  set('grad_clip_norm', 0.5);
+  // Optimiser + schedule
+  set('optimizer', 'adamw');
+  set('scheduler', 'cosine');
+  // Training loop
+  set('max_epochs', 100);
+  set('batch_size', '16');
+  set('patience', 20);
+  set('warmup_epochs', 10);
+  // Seed
+  set('seed', 42);
+  // Stacked pipeline overlay/ensemble/refine — common defaults below;
+  // ensemble size is bumped per family inside the branch (Real needs 5
+  // members because LeakyReLU members make correlated worst-sample
+  // errors that 3-median cannot filter; ReLU + 5-median closes the
+  // gap.  Complex stays at 3 because Worelu's worst-case is already
+  // tight enough at 3-median).
+  set('m10_train_overlay_density', 8);
+  set('m10_refine_steps', 100);
+  set('m10_refine_lr', 0.001);
+
+  // Step 3 — family-specific recipe values.
+  if (family === 'complex') {
+    // From poster/studies/methodology/configs/m10_winner_recipe.json
+    set('hidden_size', 48);
+    set('complex_activation', 'worelu');
+    set('dropout', 0.0004071689035540895);
+    set('input_noise_std', 0.007933403759394204);
+    set('lr', 0.012305018392414956);
+    set('weight_decay', 9.940853574579717e-7);
+    set('cosine_eta_min', 4.34544151503091e-6);
+    set('loss', 'eps_rel_mse');
+    set('m10_ensemble_size', 3);
+  } else {
+    // From poster/studies/methodology/configs/real_best.json + M09
+    // training-only winner (activation: gelu→relu, loss: mse→eps_rel_mse,
+    // ensemble: 3→5).  ReLU's hard-zero gradient breaks the correlated
+    // worst-sample errors that LeakyReLU produced across seeds.
+    set('hidden_size', 64);
+    set('activation', 'relu');
+    set('norm', 'layernorm');
+    set('dropout', 0.00945543441853456);
+    set('input_noise_std', 0.002401456187781931);
+    set('lr', 0.006983384166219469);
+    set('weight_decay', 9.268423733438246e-7);
+    set('cosine_eta_min', 1.0325337616482043e-6);
+    set('loss', 'eps_rel_mse');
+    set('m10_ensemble_size', 5);
+  }
+
+  // Visual confirmation message next to the buttons.
+  var status = document.getElementById('m10-load-status');
+  if (status) {
+    status.textContent = 'Loaded ' + family + ' winning recipe — scroll down and click Start Training';
+    status.style.color = '#15803d';
+    setTimeout(function() { status.textContent = ''; }, 4000);
+  }
+}
+
+// Submit feedback — scroll the freshly-rendered training-progress
+// card into view so the user sees that the click actually did
+// something.  Without this, the response replaces #training-area
+// (which sits below the long form) and the user has to scroll
+// manually to confirm the run started.  Listens on document.body so
+// it works across re-renders.
+document.body.addEventListener('htmx:afterSwap', function(e) {
+  if (e.detail && e.detail.target && e.detail.target.id === 'training-area') {
+    var card = e.detail.target.querySelector('#train-card, .card');
+    if (card) card.scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Inference{% endblock %}
+{% block content %}
+<h1>Permittivity Extraction</h1>
+
+<div class="card" x-data="{ selectedRuns: [] }">
+  <form hx-post="/infer" hx-target="#infer-result" hx-swap="innerHTML">
+
+    <h2>S-Parameters</h2>
+    <div class="form-grid">
+      <div>
+        <label for="s11_real">S11 Real</label>
+        <input type="text" id="s11_real" name="s11_real" inputmode="decimal"
+               value="{% match prefill_s11_real %}{% when Some with (v) %}{{ v }}{% when None %}-0.4007{% endmatch %}">
+      </div>
+      <div>
+        <label for="s11_imag">S11 Imag</label>
+        <input type="text" id="s11_imag" name="s11_imag" inputmode="decimal"
+               value="{% match prefill_s11_imag %}{% when Some with (v) %}{{ v }}{% when None %}-0.4009{% endmatch %}">
+      </div>
+      <div>
+        <label for="s21_real">S21 Real</label>
+        <input type="text" id="s21_real" name="s21_real" inputmode="decimal"
+               value="{% match prefill_s21_real %}{% when Some with (v) %}{{ v }}{% when None %}0.5868{% endmatch %}">
+      </div>
+      <div>
+        <label for="s21_imag">S21 Imag</label>
+        <input type="text" id="s21_imag" name="s21_imag" inputmode="decimal"
+               value="{% match prefill_s21_imag %}{% when Some with (v) %}{{ v }}{% when None %}-0.5580{% endmatch %}">
+      </div>
+    </div>
+    {% if prefill_s11_real.is_some() || prefill_s11_imag.is_some() || prefill_s21_real.is_some() || prefill_s21_imag.is_some() %}
+    <p style="color:#2563eb; font-size:0.85rem; margin:0.25rem 0 0.75rem;">
+      Prefilled from an evaluate-result classification cell. Adjust the frequency/thickness
+      below to match your original measurement before extracting.
+      {% if prefill_eps_prime_true.is_some() && prefill_eps_double_prime_true.is_some() %}
+      Ground-truth ε from this grid cell is also being carried through, so the
+      result table can show how far each method's prediction is from the
+      direct-method ε that generated these S-params.
+      {% endif %}
+    </p>
+    {% endif %}
+    <h2>Ground-truth ε <span style="font-weight:400; color:#64748b; font-size:0.85rem;">(optional &mdash; populates the Δ-vs-true column)</span></h2>
+    <div class="form-grid">
+      <div>
+        <label for="eps_prime_true">ε' (real)</label>
+        <input type="text" id="eps_prime_true" name="eps_prime_true" inputmode="decimal"
+               placeholder="leave blank if unknown"
+               value="{% match prefill_eps_prime_true %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+      </div>
+      <div>
+        <label for="eps_double_prime_true">ε'' (loss)</label>
+        <input type="text" id="eps_double_prime_true" name="eps_double_prime_true" inputmode="decimal"
+               placeholder="leave blank if unknown"
+               value="{% match prefill_eps_double_prime_true %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+      </div>
+    </div>
+
+    <h2>Measurement Setup</h2>
+    <div class="form-grid">
+      <div>
+        <label for="frequency_ghz">Frequency (GHz)</label>
+        <input type="text" id="frequency_ghz" name="frequency_ghz" value="8.2" inputmode="decimal">
+      </div>
+      <div>
+        <label for="thickness_mm">Thickness (mm)</label>
+        <input type="text" id="thickness_mm" name="thickness_mm" value="1.5" inputmode="decimal">
+      </div>
+    </div>
+
+    <h2>Methods to Compare</h2>
+    <div class="form-section">
+      <label class="check-label">
+        <input type="checkbox" name="use_nrw" value="yes" checked>
+        NRW Inverse (classical method)
+      </label>
+    </div>
+
+    {% if !runs.is_empty() %}
+    <h3>Trained Models</h3>
+    <div class="form-section">
+      {% for r in runs %}
+      <label class="check-label">
+        <input type="checkbox" value="{{ r.id }}"
+          x-on:change="$event.target.checked ? selectedRuns.push({{ r.id }}) : selectedRuns = selectedRuns.filter(x => x !== {{ r.id }})">
+        Run #{{ r.id }} &mdash; {{ r.model_name }}
+      </label>
+      {% endfor %}
+    </div>
+    <!-- Hidden field carries comma-separated run IDs -->
+    <input type="hidden" name="run_ids" x-bind:value="selectedRuns.join(',')">
+
+    <div style="margin-top:0.75rem;">
+      <label for="apply_refinement"
+             style="display:inline-flex; gap:0.5rem; align-items:center; cursor:pointer; margin:0;">
+        <input type="checkbox" id="apply_refinement" name="apply_refinement" value="1">
+        <span>Apply final NRW optimization stage</span>
+      </label>
+    </div>
+    {% else %}
+    <input type="hidden" name="run_ids" value="">
+    <p style="color:#64748b; font-size:0.875rem; margin-top:0.5rem;">
+      No trained models available.
+      <!-- hx-boost="false": the enclosing form has hx-target="#infer-result",
+           which boosted descendants inherit. Without this opt-out, clicking
+           "Train one" swaps the full /train page (including its nav) into
+           #infer-result instead of navigating. -->
+      <a href="/train" hx-boost="false">Train one</a> to compare NN vs NRW.
+    </p>
+    {% endif %}
+
+    <button type="submit" class="btn btn-primary" style="margin-top:1rem">Extract Permittivity</button>
+  </form>
+</div>
+
+<div id="infer-result"></div>
+{% endblock %}

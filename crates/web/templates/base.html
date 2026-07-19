@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}S-Param Inversion UI{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/htmx-sse.js"></script>
+  <script src="/static/alpine.min.js" defer></script>
+  <script src="/static/plotly.min.js?v=3.5.0"></script>
+  <script src="/static/app.js?v=1"></script>
+  <style>
+    :root {
+      --bg: #f5f5f4;
+      --bg-card: #ffffff;
+      --bg-nav: #1c1c1e;
+      --border: #d4d4d4;
+      --border-heavy: #a3a3a3;
+      --text: #1c1c1e;
+      --text-secondary: #525252;
+      --text-muted: #737373;
+      --accent: #334155;
+      --accent-hover: #1e293b;
+      --ok: #15803d;
+      --warn: #a16207;
+      --err: #b91c1c;
+      --highlight: #e0e7ff;
+      --font-ui: 'Inter', system-ui, -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: var(--font-ui); background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.45; min-height: 100vh; display: flex; }
+
+    /* ── Navigation ── */
+    nav { width: 180px; background: var(--bg-nav); color: #a1a1aa; padding: 0.75rem 0; flex-shrink: 0; min-height: 100vh; font-size: 12px; }
+    nav .brand { color: #e4e4e7; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 0 0.75rem 0.75rem; border-bottom: 1px solid #333; margin-bottom: 0.25rem; }
+    nav a { display: block; padding: 0.35rem 0.75rem; color: #a1a1aa; text-decoration: none; font-size: 12px; font-weight: 500; }
+    nav a:hover, nav a.active { color: #fff; background: rgba(255,255,255,0.07); }
+
+    /* ── Main content ── */
+    main { flex: 1; padding: 1rem 1.25rem; overflow-y: auto; }
+
+    /* ── Typography ── */
+    h1 { font-size: 15px; font-weight: 700; margin-bottom: 0.75rem; color: var(--text); letter-spacing: -0.01em; }
+    h2 { font-size: 13px; font-weight: 600; margin-bottom: 0.5rem; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; }
+    h3 { font-size: 12px; font-weight: 600; margin: 0.75rem 0 0.35rem; color: var(--text-secondary); }
+
+    /* ── Cards (panels) ── */
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 2px; padding: 0.75rem; margin-bottom: 0.5rem; }
+
+    /* ── Buttons ── */
+    .btn { display: inline-block; padding: 0.3rem 0.6rem; border-radius: 1px; font-size: 11px; font-weight: 500; font-family: var(--font-ui); text-decoration: none; cursor: pointer; border: 1px solid var(--border-heavy); background: var(--bg-card); color: var(--text); transition: background 0.1s; }
+    .btn:hover { background: #e5e5e5; }
+    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-danger { background: var(--bg-card); color: var(--err); border-color: var(--err); }
+    .btn-danger:hover { background: #fef2f2; }
+    .btn-secondary { background: var(--bg); color: var(--text-secondary); }
+    .btn-sm { font-size: 10px; padding: 0.2rem 0.4rem; }
+
+    /* ── Form elements ── */
+    label { display: block; font-size: 11px; font-weight: 500; margin-bottom: 0.15rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+    input[type="text"], input[type="number"], input[type="email"], input[type="password"], select {
+      width: 100%; padding: 0.3rem 0.4rem; border: 1px solid var(--border); border-radius: 1px; font-size: 12px; font-family: var(--font-mono); margin-bottom: 0.4rem; background: var(--bg-card); color: var(--text);
+    }
+    input[type="text"]:focus, input[type="number"]:focus, select:focus { outline: none; border-color: var(--accent); }
+    input[type="checkbox"], input[type="radio"] { width: auto; margin: 0; accent-color: var(--accent); }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 0.75rem; }
+    .form-section { margin-bottom: 0.35rem; }
+    .check-label { display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: 400; font-size: 12px; margin-bottom: 0.2rem; }
+    .radio-group { display: flex; gap: 1rem; margin-bottom: 0.5rem; }
+    .radio-group label { display: flex; align-items: center; gap: 0.25rem; cursor: pointer; font-size: 12px; }
+
+    /* ── HPO search-space columns ──────────────────────────────────
+       One column per model type. `ss-columns.both` lays out Real +
+       Complex side-by-side; `ss-columns.single` goes full-width. The
+       left-border accent colour-codes the type so the user always
+       knows which panel they're editing, and the per-column header
+       removes the need to suffix every label with "(real)/(complex)".
+    */
+    .ss-columns { display: grid; gap: 0.75rem; }
+    .ss-columns.ss-both { grid-template-columns: 1fr 1fr; }
+    .ss-columns.ss-single { grid-template-columns: 1fr; }
+    .ss-col { padding: 0.5rem 0.65rem; border: 1px solid var(--border); border-radius: 2px; background: var(--bg-card); }
+    .ss-col-real { border-left: 3px solid #1d4ed8; }
+    .ss-col-complex { border-left: 3px solid #6d28d9; }
+    .ss-col-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.4rem; padding-bottom: 0.25rem; border-bottom: 1px solid var(--border); }
+    .ss-col-real .ss-col-header { color: #1d4ed8; }
+    .ss-col-complex .ss-col-header { color: #6d28d9; }
+    .ss-section { margin-bottom: 0.75rem; }
+    .ss-section:last-child { margin-bottom: 0; }
+    .ss-section-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin: 0.25rem 0 0.25rem; }
+    .ss-field { margin-bottom: 0.4rem; }
+    .ss-field:last-child { margin-bottom: 0; }
+    .ss-chips { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-top: 0.25rem; }
+    .ss-chips .check-label { font-size: 11px; padding: 0.1rem 0.3rem; border: 1px solid var(--border); border-radius: 2px; background: var(--bg); margin-bottom: 0; }
+    .ss-chips .check-label:has(input:checked) { background: #eff6ff; border-color: #1d4ed8; }
+    .ss-col-complex .ss-chips .check-label:has(input:checked) { background: #f5f3ff; border-color: #6d28d9; }
+    .ss-chips .check-label.disabled { opacity: 0.5; cursor: not-allowed; border-style: dashed; }
+    .ss-chips .check-label.disabled input { pointer-events: none; }
+    .ss-range { display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem; margin-top: 0.25rem; }
+    .ss-range input[type="text"], .ss-range input[type="number"] { margin-bottom: 0; font-size: 11px; padding: 0.15rem 0.3rem; }
+    .ss-hint { font-size: 10px; color: var(--text-muted, #94a3b8); margin-top: 0.2rem; line-height: 1.35; font-style: italic; }
+    .ss-hint code { font-family: var(--font-mono); color: var(--text-secondary); }
+    .ss-tooltip { display: inline-block; width: 14px; height: 14px; line-height: 13px; text-align: center; font-size: 10px; border-radius: 50%; border: 1px solid var(--border-heavy); cursor: help; color: var(--text-secondary); margin-left: 0.25rem; user-select: none; }
+
+    /* ── Tables (LaTeX booktabs style) ── */
+    table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
+    thead { border-top: 2px solid var(--text); border-bottom: 1px solid var(--text); }
+    th { text-align: left; padding: 0.3rem 0.4rem; color: var(--text-secondary); font-weight: 600; font-size: 11px; font-family: var(--font-ui); text-transform: uppercase; letter-spacing: 0.03em; }
+    td { padding: 0.25rem 0.4rem; border-bottom: 1px solid #e5e5e5; }
+    tbody tr:last-child { border-bottom: 2px solid var(--text); }
+    tbody tr:last-child td { border-bottom: none; }
+
+    /* ── Metrics display ── */
+    .metric { font-size: 16px; font-weight: 700; font-family: var(--font-mono); color: var(--accent); }
+    .metric-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-family: var(--font-ui); }
+    .metrics-row { display: flex; gap: 1.25rem; margin-bottom: 0.5rem; }
+    .metric-box { text-align: center; }
+
+    /* ── Status indicators ── */
+    .success { color: var(--ok); }
+    .warning { color: var(--warn); }
+    .error-msg { color: var(--err); }
+
+    /* ── Progress bar ── */
+    .progress-bar { width: 100%; height: 4px; background: #e5e5e5; border-radius: 0; overflow: hidden; }
+    .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; }
+
+    /* ── Plots ── */
+    .plot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; }
+    .plot-grid img { width: 100%; border-radius: 0; border: 1px solid var(--border); cursor: pointer; }
+
+    /* ── Lightbox ── */
+    .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 9999; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .lightbox img { max-width: 92vw; max-height: 92vh; cursor: default; border: 1px solid #555; }
+
+    /* ── Code / pre ── */
+    pre { background: #fafafa; border: 1px solid var(--border); padding: 0.5rem; font-family: var(--font-mono); font-size: 11px; overflow-x: auto; white-space: pre-wrap; border-radius: 1px; }
+
+    /* ── Toast ── */
+    .toast { position: fixed; top: 0.5rem; right: 0.5rem; padding: 0.4rem 0.6rem; background: var(--ok); color: #fff; border-radius: 1px; font-size: 11px; z-index: 1000; }
+  </style>
+</head>
+<body hx-boost="true">
+  {% include "partials/nav.html" %}
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Image lightbox -->
+  <div id="lightbox" class="lightbox" style="display:none" onclick="this.style.display='none'">
+    <img id="lightbox-img" src="" onclick="event.stopPropagation()">
+  </div>
+  <script>
+    document.addEventListener('click', function(e) {
+      if (e.target.matches('.plot-grid img')) {
+        document.getElementById('lightbox-img').src = e.target.src;
+        document.getElementById('lightbox').style.display = 'flex';
+      }
+    });
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') document.getElementById('lightbox').style.display = 'none';
+    });
+    // Resize all Plotly charts after HTMX swaps (fixes stretched layout on navigation)
+    document.body.addEventListener('htmx:afterSettle', function() {
+      if (typeof Plotly !== 'undefined') {
+        setTimeout(function() {
+          document.querySelectorAll('.js-plotly-plot').forEach(function(el) {
+            Plotly.Plots.resize(el);
+          });
+        }, 50);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Evaluate NRW (analytical){% endblock %}
+{% block content %}
+<h1>Evaluate NRW &mdash; analytical round-trip</h1>
+
+<div class="card" style="margin-bottom:0.75rem; color:#475569;">
+  Runs the closed-form NRW algorithm directly: forward
+  <code>(&epsilon;', &epsilon;'') &rarr; (S<sub>11</sub>, S<sub>21</sub>)</code>,
+  then inverse <code>(S<sub>11</sub>, S<sub>21</sub>) &rarr; (&epsilon;'&#770;, &epsilon;''&#770;)</code>,
+  and compares against the input grid. <strong>No trained model is required.</strong>
+  Use this to visualise where the analytical inverse fails (Step 1 instability near
+  vacuum, Step 4 phase ambiguity for thick samples) before training a neural-net
+  alternative.
+  <a href="/evaluate" style="margin-left:0.5rem;">&laquo; back to model evaluation</a>
+</div>
+
+<div class="card">
+  <form hx-post="/evaluate/nrw" hx-target="#eval-result" hx-swap="innerHTML">
+
+    <fieldset style="border:1px solid #e2e8f0; padding:0.75rem; margin-bottom:0.75rem;">
+      <legend>Waveguide &amp; frequency</legend>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.75rem;">
+        <div>
+          <label for="d_mm">Sample thickness <em>d</em> (mm)</label>
+          <input type="number" step="0.001" min="0.001" name="d_mm"
+                 id="d_mm" value="1.5" required>
+        </div>
+        <div>
+          <label for="a_mm">Waveguide width <em>a</em> (mm)</label>
+          <input type="number" step="0.001" min="0.001" name="a_mm"
+                 id="a_mm" value="22.86" required>
+        </div>
+        <div>
+          <label for="frequency_ghz">Frequency <em>f</em> (GHz)</label>
+          <input type="number" step="0.001" min="0.001" name="frequency_ghz"
+                 id="frequency_ghz" value="8.2" required>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset style="border:1px solid #e2e8f0; padding:0.75rem; margin-bottom:0.75rem;">
+      <legend>Permittivity grid (&mu;<sub>r</sub> = 1)</legend>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0.75rem;">
+        <div>
+          <label for="eps_prime_min">&epsilon;' min</label>
+          <input type="number" step="0.01" name="eps_prime_min"
+                 id="eps_prime_min" value="1" required>
+        </div>
+        <div>
+          <label for="eps_prime_max">&epsilon;' max</label>
+          <input type="number" step="0.01" name="eps_prime_max"
+                 id="eps_prime_max" value="200" required>
+        </div>
+        <div>
+          <label for="n_eps_prime">N along &epsilon;'</label>
+          <input type="number" step="1" min="2" max="500" name="n_eps_prime"
+                 id="n_eps_prime" value="200" required>
+        </div>
+        <div></div>
+        <div>
+          <label for="eps_double_prime_min">&epsilon;'' min</label>
+          <input type="number" step="0.01" min="0" name="eps_double_prime_min"
+                 id="eps_double_prime_min" value="0" required>
+        </div>
+        <div>
+          <label for="eps_double_prime_max">&epsilon;'' max</label>
+          <input type="number" step="0.01" name="eps_double_prime_max"
+                 id="eps_double_prime_max" value="100" required>
+        </div>
+        <div>
+          <label for="n_eps_double_prime">N along &epsilon;''</label>
+          <input type="number" step="1" min="2" max="500" name="n_eps_double_prime"
+                 id="n_eps_double_prime" value="100" required>
+        </div>
+        <div></div>
+      </div>
+    </fieldset>
+
+    <button type="submit" class="btn btn-primary">Run NRW round-trip</button>
+  </form>
+</div>
+
+<div id="eval-result"></div>
+{% endblock %}

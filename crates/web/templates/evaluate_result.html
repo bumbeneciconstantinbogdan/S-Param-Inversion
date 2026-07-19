@@ -1,0 +1,714 @@
+<style>
+  /* Plotly CSS reset — on the second HTMX swap, Plotly was creating
+     three sibling `<svg class="main-svg">` elements per chart with
+     no inline `position` style, so they flowed vertically as static
+     blocks (the title + colorbar fell ~525 px and ~1050 px below
+     the chart container).  Forcing absolute on every direct child
+     of `.svg-container` overlays them at top:0 left:0 the way
+     Plotly's first render did.  Idempotent: same selector on every
+     render, no double-effect on the first submit. */
+  .plot-container .svg-container > svg,
+  .plot-container .svg-container > .gl-container {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+  }
+
+</style>
+<div class="card" style="border-color:#16a34a; background:#f0fdf4;">
+  <h2 class="success">Evaluation: {{ model_name }}</h2>
+  <p style="color:#64748b; font-size:0.875rem; margin-bottom:1rem;">{{ test_samples }} test samples</p>
+
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="metric">{{ r2_real }}</div>
+      <div class="metric-label">R2 (eps')</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ r2_imag }}</div>
+      <div class="metric-label">R2 (eps'')</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ ok_1pct }}%</div>
+      <div class="metric-label">OK @ 1%</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ ok_10pct }}%</div>
+      <div class="metric-label">OK @ 10%</div>
+    </div>
+  </div>
+
+  <table style="margin-top:1rem;">
+    <thead>
+      <tr><th>Metric</th><th>NN Model</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>OK @ 1%</td><td>{{ ok_1pct }}%</td></tr>
+      <tr><td>OK @ 10%</td><td>{{ ok_10pct }}%</td></tr>
+      <tr><td>Mean Error</td><td>{{ mean_error }}%</td></tr>
+      <tr><td>Max Error</td><td>{{ max_error }}%</td></tr>
+      <tr><td>Min Error</td><td>{{ min_error }}%</td></tr>
+      <tr><td>Std Error</td><td>{{ std_error }}%</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>var __evalCharts = {{ charts_json|safe }};</script>
+
+<!-- Error Histogram -->
+<div class="card">
+  <h2>Relative Error Distribution</h2>
+  <div id="histogram-chart" style="width:100%; height:420px;"></div>
+</div>
+
+<!-- R² Scatter — Real -->
+<div class="card">
+  <h2>R² Scatter — Real Component (ε')</h2>
+  <div id="r2-real-chart" style="width:100%; height:520px;"></div>
+</div>
+
+<!-- R² Scatter — Imaginary -->
+<div class="card">
+  <h2>R² Scatter — Imaginary Component (ε'')</h2>
+  <div id="r2-imag-chart" style="width:100%; height:520px;"></div>
+</div>
+
+<!-- Classification Maps -->
+<div class="card">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.25rem; gap:0.5rem; flex-wrap:wrap;">
+    <h2 style="margin:0">Classification Maps</h2>
+    <div style="display:flex; gap:0.4rem;">
+      {# `Toggle Patch Maps` is rendered in the DOM unconditionally
+         and only wired up by the JS when `d.patch_grid` is present
+         (i.e. the dataset has the dense low-ε patch overlay enabled).
+         Legacy datasets without the patch get the button hidden. #}
+      {# Patch toggle removed — the dense-patch panel is always
+         visible on first paint.  Earlier we hid it behind a button
+         that toggled `display:none`/`block`, but the inline style
+         attribute was being restored to the template default
+         ~700 ms after each HTMX swap (Plotly's late draw cycle
+         re-touches the swapped subtree), which made the panel
+         vanish on every second `/evaluate` submit. #}
+      <button id="btn-classmap-grid" class="btn btn-sm">Toggle Grid</button>
+    </div>
+  </div>
+  <div id="classmap-0-summary"
+       style="font-family:'JetBrains Mono', monospace; font-size:0.78rem;
+              color:#0f172a; margin:0.25rem 0 0.4rem;"></div>
+  <div id="classmap-0" style="width:100%; height:520px;"></div>
+
+  {# Per-cell rel-err is already streamed into the page via
+     `d.grid.error_grid`, so this second map can be re-classified in
+     the browser at any threshold without a server round-trip. The
+     1 % map (idx 0) stays static — its threshold is what HPO and
+     the metrics table optimised for, so re-coloring it would lie
+     about the model's reported `ok@1%`. The 10 % map is the
+     "exploration" view: change the slider and the green/red colors,
+     OK count, and percentage all update live from the same
+     underlying error matrix. #}
+  <div id="dyn-thresh-controls"
+       style="display:flex; align-items:center; gap:0.75rem;
+              margin:0.6rem 0 0.4rem; padding:0.55rem 0.75rem;
+              background:#f1f5f9; border-radius:0.375rem;
+              font-size:0.875rem;">
+    <label for="dyn-thresh-input" style="font-weight:600; margin:0; white-space:nowrap;">
+      Threshold (%)
+    </label>
+    <input type="range" id="dyn-thresh-slider"
+           min="0.1" max="50" step="0.1" value="10"
+           style="flex:1; min-width:120px;">
+    <input type="number" id="dyn-thresh-input"
+           min="0.01" max="100" step="0.1" value="10"
+           style="width:6.5rem; padding:0.35rem 0.5rem;">
+    <span id="dyn-thresh-summary"
+          style="font-family:monospace; color:#0f172a; white-space:nowrap;"></span>
+  </div>
+  <div id="classmap-1-summary"
+       style="font-family:'JetBrains Mono', monospace; font-size:0.78rem;
+              color:#0f172a; margin:0.25rem 0 0.4rem;"></div>
+  <div id="classmap-1" style="width:100%; height:520px;"></div>
+
+  {# Dense low-ε patch maps — a separate, zoomed-in pair of
+     classification maps for the dense overlay region. Hidden until
+     `Show Dense Patch` is clicked, then expands inline. The
+     embedded-on-the-bulk-map approach we tried earlier collapsed
+     visually because the patch covers <2 % of the bulk axis range
+     so its cells / markers are easy to overlook; a separate panel
+     restores the dense view without fighting the bulk-axis scale.
+     The two thresholds (1 % and 10 %) match the bulk side; the 10 %
+     map is also re-coloured by the same shared dynamic-threshold
+     slider above. #}
+  <div id="patch-maps-container">
+    <h3 style="margin:1rem 0 0.4rem; font-size:1rem; color:#1d4ed8;">
+      Dense low-ε patch (zoomed view)
+    </h3>
+    <p style="font-size:0.78rem; color:#64748b; margin:0 0 0.6rem;">
+      Smaller grid concentrated in the
+      <code id="patch-region-label">[…]</code> region — the
+      near-vacuum corner the bulk grid samples sparsely. Generated as part of
+      the dataset; train/val/test patch axes are linearly displaced so
+      no test point coincides with a train one.
+    </p>
+    <div id="patch-classmap-0-summary"
+         style="font-family:'JetBrains Mono', monospace; font-size:0.78rem;
+                color:#0f172a; margin:0.25rem 0 0.4rem;"></div>
+    <div id="patch-classmap-0" style="width:100%; height:420px;"></div>
+    <div id="patch-classmap-1-summary"
+         style="font-family:'JetBrains Mono', monospace; font-size:0.78rem;
+                color:#0f172a; margin:0.25rem 0 0.4rem;"></div>
+    <div id="patch-classmap-1" style="width:100%; height:420px;"></div>
+  </div>
+</div>
+
+<!-- 3D Error Surface -->
+<div class="card">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.25rem;">
+    <h2 style="margin:0">Error Surface</h2>
+    <button id="btn-surface-scale" class="btn btn-sm btn-primary">Log Scale</button>
+  </div>
+  <div id="error-surface-chart" style="width:100%; height:650px;"></div>
+</div>
+
+<script>
+(function() {
+  var d = __evalCharts;
+  if (!d || !d.errors || typeof Plotly === 'undefined') return;
+  var monoFont = "'JetBrains Mono', monospace";
+
+  // Purge any stale Plotly state from a previous /evaluate submit
+  // before rendering.  Without this, the second HTMX swap re-uses
+  // chart `<div>`s whose internal Plotly layout cache still
+  // references the prior render's container width — Plotly draws
+  // into the new DOM with the old size and labels overflow.
+  // Idempotent: purge() on a div with no Plotly state is a no-op.
+  ['histogram-chart', 'r2-real-chart', 'r2-imag-chart',
+   'classmap-0', 'classmap-1',
+   'patch-classmap-0', 'patch-classmap-1',
+   'error-surface-chart'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) try { Plotly.purge(el); } catch (e) { /* fresh div, no-op */ }
+  });
+
+  // Plotly layout shared by every chart in this page: `responsive`
+  // makes the chart re-fit when the card width changes (e.g.\ when
+  // the second HTMX swap inserts new content with slightly
+  // different fonts / cards already laid out).
+  var commonConfig = { responsive: true, displaylogo: false };
+
+  // ── Error Histogram (horizontal: error on Y, count on X) ───
+  (function() {
+    var errors = d.errors.filter(function(v) { return v !== null && isFinite(v); });
+    if (errors.length === 0) return;
+
+    var sorted = errors.slice().sort(function(a, b) { return a - b; });
+    var mean = errors.reduce(function(s, v) { return s + v; }, 0) / errors.length;
+    var median = sorted.length % 2 === 0
+      ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+      : sorted[Math.floor(sorted.length / 2)];
+    var maxErr = sorted[sorted.length - 1];
+
+    var traces = [{
+      y: errors, type: 'histogram', nbinsy: 50,
+      marker: { color: 'rgba(37,99,235,0.6)', line: { color: '#2563eb', width: 1 } },
+      hovertemplate: 'Error: %{y}<br>Count: %{x}<extra></extra>'
+    }];
+
+    var maxCount = 0;
+    var nBins = 50, min = sorted[0], max = sorted[sorted.length - 1];
+    var bw = (max - min) / nBins;
+    if (bw > 0) {
+      var bins = new Array(nBins).fill(0);
+      errors.forEach(function(v) { var i = Math.min(Math.floor((v - min) / bw), nBins - 1); if (i >= 0) bins[i]++; });
+      maxCount = Math.max.apply(null, bins);
+    }
+
+    var layout = {
+      margin: { t: 10, r: 30, b: 50, l: 80 },
+      font: { family: monoFont, size: 11 },
+      yaxis: { title: 'Relative Error (%)' },
+      xaxis: { title: 'Count' },
+      bargap: 0.02,
+      shapes: [
+        { type: 'line', y0: mean, y1: mean, x0: 0, x1: maxCount * 1.1, line: { color: '#dc2626', width: 2, dash: 'dash' } },
+        { type: 'line', y0: median, y1: median, x0: 0, x1: maxCount * 1.1, line: { color: '#16a34a', width: 2, dash: 'dash' } },
+        { type: 'line', y0: maxErr, y1: maxErr, x0: 0, x1: maxCount * 1.1, line: { color: '#9333ea', width: 2, dash: 'dot' } }
+      ],
+      annotations: [
+        { y: mean, x: maxCount * 0.95, text: 'Mean: ' + mean.toFixed(2) + '%', showarrow: false, font: { color: '#dc2626', size: 10 }, yanchor: 'bottom', yshift: 4 },
+        { y: median, x: maxCount * 0.85, text: 'Median: ' + median.toFixed(2) + '%', showarrow: false, font: { color: '#16a34a', size: 10 }, yanchor: 'bottom', yshift: 4 },
+        { y: maxErr, x: maxCount * 0.75, text: 'Max: ' + maxErr.toFixed(2) + '%', showarrow: false, font: { color: '#9333ea', size: 10 }, yanchor: 'bottom', yshift: 4 }
+      ]
+    };
+
+    Plotly.newPlot('histogram-chart', traces, layout, {
+      responsive: true, displayModeBar: true,
+      toImageButtonOptions: { format: 'png', filename: 'error_histogram', scale: 2 }
+    });
+  })();
+
+  // ── R² Scatter helper ──────────────────────────────────────
+  function buildScatter(divId, trueArr, predArr, r2Val, label, filename) {
+    var xData = [], yData = [];
+    for (var i = 0; i < trueArr.length; i++) {
+      if (isFinite(trueArr[i]) && isFinite(predArr[i])) {
+        xData.push(trueArr[i]);
+        yData.push(predArr[i]);
+      }
+    }
+    if (xData.length === 0) return;
+
+    var allVals = xData.concat(yData);
+    var lo = Math.min.apply(null, allVals);
+    var hi = Math.max.apply(null, allVals);
+    var pad = (hi - lo) * 0.03;
+    lo = Math.max(0, lo - pad);
+    hi += pad;
+
+    var traces = [
+      {
+        x: xData, y: yData, type: 'scatter', mode: 'markers', name: 'Predictions',
+        marker: { color: 'rgba(37,99,235,0.35)', size: 3, line: { color: 'rgba(37,99,235,0.6)', width: 0.5 } },
+        hovertemplate: 'True: %{x:.5g}<br>Pred: %{y:.5g}<extra></extra>'
+      },
+      {
+        x: [lo, hi], y: [lo, hi], type: 'scatter', mode: 'lines', name: 'y = x',
+        line: { color: '#1c1c1e', width: 1.5, dash: 'dash' },
+        hoverinfo: 'skip'
+      }
+    ];
+
+    var layout = {
+      margin: { t: 35, r: 30, b: 50, l: 60 },
+      font: { family: monoFont, size: 11 },
+      title: { text: label + '  —  R² = ' + r2Val.toFixed(5), font: { size: 13 } },
+      xaxis: { title: 'True ' + label, range: [lo, hi], constrain: 'domain' },
+      yaxis: { title: 'Predicted ' + label, range: [lo, hi], constrain: 'domain' },
+      legend: { orientation: 'h', y: -0.12, x: 0.5, xanchor: 'center' }
+    };
+
+    Plotly.newPlot(divId, traces, layout, {
+      responsive: true, displayModeBar: true,
+      toImageButtonOptions: { format: 'png', filename: filename, scale: 2 }
+    });
+  }
+
+  // ── R² Real ────────────────────────────────────────────────
+  buildScatter('r2-real-chart', d.true_real, d.pred_real, d.r2_real, "ε' (Real)", 'r2_scatter_real');
+
+  // ── R² Imaginary ───────────────────────────────────────────
+  buildScatter('r2-imag-chart', d.true_imag, d.pred_imag, d.r2_imag, "ε'' (Imaginary)", 'r2_scatter_imag');
+
+  // ── Classification Maps (Plotly heatmap) ────────────────────
+  // Shared per-classmap renderer. Used twice: once for the bulk
+  // grid (the classmap-0 / classmap-1 pair) and once for the dense
+  // low-ε patch (patch-classmap-0 / patch-classmap-1) when the
+  // dataset has the patch overlay enabled. Same heatmap colours,
+  // same click-to-/infer behaviour, same layout — only the
+  // backing grid + classifications differ.
+  // Builds a single Plotly heatmap trace from a (mask, gridData)
+  // pair. The bulk classmap uses one trace at trace-index 0; the
+  // patch overlay (when present) is added as trace-index 1 with
+  // `showscale:false` so the colorbar isn't duplicated.
+  function buildHeatmapTrace(grid_mask, gridData, opts) {
+    var zData = [];
+    for (var j = 0; j < grid_mask.length; j++) {
+      var row = [];
+      for (var i = 0; i < grid_mask[j].length; i++) {
+        row.push(grid_mask[j][i] ? 1 : 0);
+      }
+      zData.push(row);
+    }
+    var trace = {
+      z: zData,
+      x: gridData.eps_prime,
+      y: gridData.eps_double_prime,
+      type: 'heatmap',
+      zmin: 0, zmax: 1,
+      colorscale: [[0, '#b91c1c'], [1, '#15803d']],
+      showscale: opts && opts.showscale !== false,
+      hoverongaps: false,
+      xgap: opts && opts.gap != null ? opts.gap : 1,
+      ygap: opts && opts.gap != null ? opts.gap : 1,
+    };
+    if (trace.showscale) {
+      trace.colorbar = {
+        tickvals: [0.25, 0.75],
+        ticktext: ['Not OK', 'OK'],
+        len: 0.55, thickness: 14,
+        x: 1.02, y: 0.5, ypad: 0,
+        outlinewidth: 0,
+      };
+    }
+    return trace;
+  }
+
+  function renderClassmap(divId, cls, gridData, opts) {
+    if (!document.getElementById(divId) || !cls.grid_mask) return false;
+    opts = opts || {};
+
+    var okCount = cls.ok_count || 0;
+    var total = cls.total || 0;
+    var okPct = cls.ok_percent != null ? cls.ok_percent.toFixed(1) : '?';
+    var failCount = total - okCount;
+    var threshStr = cls.threshold.toFixed(0);
+    var titlePrefix = opts.titlePrefix || '';
+
+    var traces = [buildHeatmapTrace(cls.grid_mask, gridData, { showscale: true })];
+
+    Plotly.newPlot(divId, traces, {
+      title: { text: titlePrefix + 'OK @ ' + threshStr + '%', font: { size: 14 }, x: 0.05, xanchor: 'left' },
+      xaxis: { title: "ε' (Real Permittivity)", showgrid: true, gridcolor: 'rgba(0,0,0,0.08)' },
+      yaxis: { title: "ε'' (Loss Factor)", showgrid: true, gridcolor: 'rgba(0,0,0,0.08)' },
+      margin: { t: 40, r: 110, b: 55, l: 70 }
+    }, commonConfig);
+
+    // Caption / count summary lives outside the plot so the long
+    // string never collides with the Plotly title or the colorbar
+    // when the card is narrow.  The title above stays terse.
+    var summaryEl = document.getElementById(divId + '-summary');
+    if (summaryEl) {
+      summaryEl.textContent =
+        okCount + '/' + total + ' OK (' + okPct + '%) — ' +
+        failCount + ' failures · click any cell → /infer with its S-params';
+    }
+
+    // Click on a cell → jump to /infer prefilled with the exact
+    // S-parameters that produced that (ε', ε''). The cell's known
+    // ε is also passed through as `eps_*_true` so /infer's status
+    // column scores predictions against the direct-method ground
+    // truth instead of the (less reliable) NRW Inverse output.
+    var plotEl = document.getElementById(divId);
+    plotEl.on('plotly_click', function(ev) {
+      var pt = ev && ev.points && ev.points[0];
+      if (!pt) return;
+      var xi = pt.pointIndex ? pt.pointIndex[1] : null;
+      var yi = pt.pointIndex ? pt.pointIndex[0] : null;
+      if (xi == null || yi == null) return;
+      var s11r = gridData.s11_real && gridData.s11_real[yi] && gridData.s11_real[yi][xi];
+      var s11i = gridData.s11_imag && gridData.s11_imag[yi] && gridData.s11_imag[yi][xi];
+      var s21r = gridData.s21_real && gridData.s21_real[yi] && gridData.s21_real[yi][xi];
+      var s21i = gridData.s21_imag && gridData.s21_imag[yi] && gridData.s21_imag[yi][xi];
+      if ([s11r, s11i, s21r, s21i].some(function(v) { return v == null; })) return;
+      var epTrue  = gridData.eps_prime        && gridData.eps_prime[xi];
+      var edpTrue = gridData.eps_double_prime && gridData.eps_double_prime[yi];
+      var qs = new URLSearchParams({
+        s11_real: s11r, s11_imag: s11i,
+        s21_real: s21r, s21_imag: s21i,
+      });
+      if (epTrue != null)  qs.set('eps_prime_true', epTrue);
+      if (edpTrue != null) qs.set('eps_double_prime_true', edpTrue);
+      window.location.href = '/infer?' + qs.toString();
+    });
+    return true;
+  }
+
+  // Bulk grid — headline view. When the dataset carries a dense
+  // patch (`d.patch_grid`) the same threshold's patch mask is
+  // shown unchanged. The patch (when the dataset has it) gets its
+  // own zoomed-in panel below — the bulk maps don't carry an
+  // overlay any more after the user feedback that the embedded
+  // version was visually noisy.
+  var classmapDivs = [];
+  if (d.grid && d.classifications) {
+    var showGrid = true;
+    d.classifications.forEach(function(cls, idx) {
+      var divId = 'classmap-' + idx;
+      if (renderClassmap(divId, cls, d.grid)) classmapDivs.push(divId);
+    });
+
+    // Dense-patch maps — separate zoomed-in panel below the bulk
+    // classmaps. Hidden until `Show Dense Patch` is clicked, then
+    // expands inline so the patch's small axis range gets a chart
+    // of its own (the embedded-on-bulk overlay we tried earlier
+    // collapsed visually because the patch covers under 2 % of the
+    // bulk axis range). Two thresholds (1 % and 10 %) mirror the
+    // bulk side; the 10 % map follows the shared dynamic slider
+    // alongside the bulk's 10 % map.
+    var patchClassmapDivs = [];
+    var patchContainer = document.getElementById('patch-maps-container');
+    if (d.patch_grid && d.patch_classifications && patchContainer) {
+      d.patch_classifications.forEach(function(cls, idx) {
+        var divId = 'patch-classmap-' + idx;
+        if (renderClassmap(divId, cls, d.patch_grid, { titlePrefix: 'Dense patch — ' })) {
+          patchClassmapDivs.push(divId);
+        }
+      });
+      // Annotate the description with the actual patch axis range
+      // so the label always matches what's drawn.
+      var label = document.getElementById('patch-region-label');
+      if (label && d.patch_grid.eps_prime && d.patch_grid.eps_double_prime) {
+        var ep = d.patch_grid.eps_prime;
+        var edp = d.patch_grid.eps_double_prime;
+        var fmt = function(v) { return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0); };
+        label.textContent = '[' + fmt(ep[0]) + ', ' + fmt(ep[ep.length - 1]) +
+          '] × [' + fmt(edp[0]) + ', ' + fmt(edp[edp.length - 1]) +
+          '] — ' + ep.length + ' × ' + edp.length + ' = ' +
+          (ep.length * edp.length) + ' cells';
+      }
+      // The dense-patch container is now always visible (toggle
+       // button removed — see HTML comment above).  Force a Plotly
+       // resize after a tick because the patch divs are 100 % wide
+       // children of a container whose width can briefly be 0 while
+       // HTMX is still swapping; the resize captures the final
+       // width once layout settles.
+      setTimeout(function() {
+        patchClassmapDivs.forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el && el._fullLayout) {
+            try { Plotly.Plots.resize(el); } catch (e) { /* ok */ }
+          }
+        });
+      }, 100);
+    } else if (patchContainer) {
+      // Legacy dataset (no patch overlay) — replace the empty
+      // panel content with a hint pointing at /generate so the
+      // user can tell missing-patch from rendering-bug.
+      patchContainer.innerHTML =
+        '<p style="font-size:0.8rem; color:#92400e; margin:0.5rem 0; ' +
+        'padding:0.4rem 0.6rem; background:#fffbeb; border-radius:0.375rem;">' +
+        '<em>No dense low-ε patch in this dataset. Regenerate via ' +
+        '<a href="/generate">/generate</a> to enable a 10×10 train + 5×5 ' +
+        'val/test overlay over [1, 2.5] × [0, 1.75], then train + evaluate again.</em></p>';
+    }
+
+    document.getElementById('btn-classmap-grid').addEventListener('click', function() {
+      showGrid = !showGrid;
+      var gap = showGrid ? 1 : 0;
+      var gridColor = showGrid ? 'rgba(0,0,0,0.08)' : 'rgba(0,0,0,0)';
+      classmapDivs.concat(patchClassmapDivs).forEach(function(id) {
+        Plotly.restyle(id, { xgap: gap, ygap: gap }, [0]);
+        Plotly.relayout(id, {
+          'xaxis.showgrid': showGrid, 'xaxis.gridcolor': gridColor,
+          'yaxis.showgrid': showGrid, 'yaxis.gridcolor': gridColor
+        });
+      });
+      this.textContent = showGrid ? 'Hide Grid' : 'Show Grid';
+    });
+
+    // Live threshold control for the 10 % maps. One slider drives
+    // every dynamic classmap registered below — the bulk
+    // `classmap-1` always, and the dense-patch `patch-classmap-1`
+    // when the dataset has the patch overlay. The 1 % maps stay
+    // static so the headline metrics never disagree with the
+    // colour they're shown next to.
+    var slider = document.getElementById('dyn-thresh-slider');
+    var input  = document.getElementById('dyn-thresh-input');
+    var summary = document.getElementById('dyn-thresh-summary');
+
+    // Each entry = a heatmap-trace whose 10 % colouring follows the
+    // slider. The bulk classmap-1 has trace-index 0 (bulk) and may
+    // have an additional trace-index 1 (patch overlay) drawn on top
+    // of it — both follow the same threshold but the title only
+    // updates from the bulk entry (the overlay's stats live in the
+    // dedicated patch-classmap-1 below).
+    var dynamicTargets = [];
+    if (d.grid && d.grid.error_grid && document.getElementById('classmap-1')) {
+      dynamicTargets.push({
+        divId: 'classmap-1',
+        traceIdx: 0,
+        errorGrid: d.grid.error_grid,
+        titlePrefix: '',
+        updateTitle: true,
+      });
+    }
+    if (d.patch_grid && d.patch_grid.error_grid &&
+        document.getElementById('patch-classmap-1')) {
+      // Dense-patch 10 % map in the dedicated zoomed panel. Owns
+      // its own title — recomputes OK% over the patch subset.
+      dynamicTargets.push({
+        divId: 'patch-classmap-1',
+        traceIdx: 0,
+        errorGrid: d.patch_grid.error_grid,
+        titlePrefix: 'Dense patch — ',
+        updateTitle: true,
+      });
+    }
+
+    if (dynamicTargets.length > 0 && slider && input && summary) {
+      // Per-target invariant denominator (total finite cells), so the
+      // OK % shown in each title is over THAT grid, not a mix of bulk
+      // + patch cell counts.
+      dynamicTargets.forEach(function(t) {
+        var n = 0;
+        for (var jr = 0; jr < t.errorGrid.length; jr++) {
+          for (var ir = 0; ir < t.errorGrid[jr].length; ir++) {
+            if (isFinite(t.errorGrid[jr][ir])) n++;
+          }
+        }
+        t.totalFinite = n;
+      });
+
+      function recolorOne(t, threshold) {
+        var zMask = [];
+        var okCount = 0;
+        for (var j = 0; j < t.errorGrid.length; j++) {
+          var rowMask = [];
+          for (var i = 0; i < t.errorGrid[j].length; i++) {
+            var v = t.errorGrid[j][i];
+            // `null` / `NaN` cells stay "Not OK" so the colour map
+            // doesn't lie about coverage; the OK count itself only
+            // increments on finite cells inside the threshold.
+            var ok = isFinite(v) && v <= threshold;
+            rowMask.push(ok ? 1 : 0);
+            if (ok) okCount++;
+          }
+          zMask.push(rowMask);
+        }
+        var failCount = t.totalFinite - okCount;
+        var okPct = t.totalFinite > 0 ? (okCount / t.totalFinite * 100) : 0;
+        var threshStr = threshold < 1
+          ? threshold.toFixed(2)
+          : threshold.toFixed(threshold % 1 === 0 ? 0 : 1);
+
+        Plotly.restyle(t.divId, { z: [zMask] }, [t.traceIdx || 0]);
+        if (t.updateTitle) {
+          // Plotly title carries only the short "OK @ X%" tag; the
+          // count / failures / click hint live in the adjacent
+          // summary <div> so the long string can't overflow into
+          // the chart area or collide with the colorbar.
+          Plotly.relayout(t.divId, {
+            'title.text': t.titlePrefix + 'OK @ ' + threshStr + '%'
+          });
+          var summaryEl = document.getElementById(t.divId + '-summary');
+          if (summaryEl) {
+            summaryEl.textContent =
+              okCount + '/' + t.totalFinite + ' OK (' + okPct.toFixed(1) + '%) — ' +
+              failCount + ' failures · click any cell → /infer with its S-params';
+          }
+        }
+        return {
+          okCount: okCount, total: t.totalFinite,
+          failCount: failCount, okPct: okPct,
+          isPatch: t.titlePrefix && t.titlePrefix.indexOf('patch') !== -1,
+          countsForSummary: t.updateTitle,
+        };
+      }
+
+      function recolor(threshold) {
+        var stats = dynamicTargets.map(function(t) { return recolorOne(t, threshold); });
+        // Summary span shows bulk + patch — but only one stats line
+        // per logical region (skip the overlay-on-bulk entry, which
+        // would double-count the patch into a row that says it's
+        // bulk).
+        var parts = [];
+        stats.forEach(function(s) {
+          if (!s.countsForSummary) return;
+          var label = s.isPatch ? ' · patch ' : '';
+          parts.push(label + s.okCount + '/' + s.total + ' OK (' +
+            s.okPct.toFixed(1) + '%)');
+        });
+        summary.textContent = parts.join('');
+      }
+
+      function applyFromInput(src) {
+        var raw = parseFloat(src.value);
+        if (!isFinite(raw) || raw <= 0) return;
+        var sliderMax = parseFloat(slider.max);
+        var sliderMin = parseFloat(slider.min);
+        var clamped = Math.max(sliderMin, Math.min(sliderMax, raw));
+        if (src === input)  slider.value = clamped;
+        if (src === slider) input.value  = raw.toFixed(raw < 1 ? 2 : 1);
+        recolor(raw);
+      }
+
+      slider.addEventListener('input', function() { applyFromInput(slider); });
+      input.addEventListener('input',  function() { applyFromInput(input); });
+      recolor(parseFloat(input.value) || 10);
+    }
+  }
+
+  // ── 3D Error Surface ───────────────────────────────────────
+  if (d.grid && d.grid.error_grid && document.getElementById('error-surface-chart')) {
+    var zRaw = d.grid.error_grid;
+
+    // Compute stats
+    var allErrs = [];
+    zRaw.forEach(function(row) { row.forEach(function(v) { if (isFinite(v)) allErrs.push(v); }); });
+    var maxErr = Math.max.apply(null, allErrs);
+    var minErr = Math.min.apply(null, allErrs);
+    var meanErr = allErrs.reduce(function(s,v){return s+v;},0) / allErrs.length;
+
+    var zLog = zRaw.map(function(row) {
+      return row.map(function(v) { return Math.log10(Math.max(v, 1e-6)); });
+    });
+
+    var isLogScale = true;
+    var surfTitle = '3D Error Surface — max=' + maxErr.toFixed(2) + '%, mean=' + meanErr.toFixed(3) + '%, min=' + minErr.toFixed(4) + '%';
+
+    function makeSurfLayout(ztitle) {
+      return {
+        title: { text: surfTitle, font: { size: 14 } },
+        scene: {
+          xaxis: { title: { text: "ε' (Real Permittivity)" } },
+          yaxis: { title: { text: "ε'' (Loss Factor)" } },
+          zaxis: { title: { text: ztitle } },
+          camera: { eye: { x: 1.87, y: 0.88, z: 0.64 } }
+        },
+        margin: { t: 55, r: 20, b: 20, l: 20 }
+      };
+    }
+
+    function makeSurfTrace(zData, isLog) {
+      if (isLog) {
+        return {
+          z: zData, x: d.grid.eps_prime, y: d.grid.eps_double_prime,
+          type: 'surface', colorscale: 'Viridis',
+          colorbar: {
+            title: { text: 'Relative Error (%)', side: 'right' },
+            tickvals: [-3, -2, -1, 0, 1],
+            ticktext: ['0.001%', '0.01%', '0.1%', '1%', '10%'],
+            len: 0.75
+          }
+        };
+      }
+      return {
+        z: zData, x: d.grid.eps_prime, y: d.grid.eps_double_prime,
+        type: 'surface', colorscale: 'Viridis',
+        colorbar: {
+          title: { text: 'Relative Error (%)', side: 'right' },
+          len: 0.75
+        }
+      };
+    }
+
+    Plotly.newPlot('error-surface-chart',
+      [makeSurfTrace(zLog, true)],
+      makeSurfLayout('Relative Error (%) [log scale]'),
+      commonConfig
+    );
+
+    document.getElementById('btn-surface-scale').addEventListener('click', function() {
+      isLogScale = !isLogScale;
+      var zData = isLogScale ? zLog : zRaw;
+      var ztitle = isLogScale ? 'Relative Error (%) [log scale]' : 'Relative Error (%)';
+      Plotly.react('error-surface-chart',
+        [makeSurfTrace(zData, isLogScale)],
+        makeSurfLayout(ztitle)
+      );
+      this.textContent = isLogScale ? 'Log Scale' : 'Linear Scale';
+      this.classList.toggle('btn-primary', isLogScale);
+    });
+  }
+
+  // After HTMX swaps the result HTML in, the new chart `<div>`s have
+  // their dimensions captured by Plotly during `newPlot` --- but if
+  // the surrounding cards are still settling (browser hadn't laid
+  // out the previous result when this script first ran), the captured
+  // width can be stale.  Trigger an explicit resize a tick later, on
+  // every chart we've drawn, so the second / third / nth /evaluate
+  // submit still produces a clean layout instead of overflowing
+  // labels and overlapping axis titles.
+  setTimeout(function() {
+    ['histogram-chart', 'r2-real-chart', 'r2-imag-chart',
+     'classmap-0', 'classmap-1',
+     'patch-classmap-0', 'patch-classmap-1',
+     'error-surface-chart'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el && el._fullLayout) {
+        try { Plotly.Plots.resize(el); } catch (e) { /* div empty */ }
+      }
+    });
+  }, 50);
+})();
+</script>
+

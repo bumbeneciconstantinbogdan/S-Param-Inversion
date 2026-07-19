@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ run.id }} — {{ run.model_name }}{% endblock %}
+{% block content %}
+<h1>Training Run #{{ run.id }}</h1>
+
+<div class="card">
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="metric">{{ run.model_name }}</div>
+      <div class="metric-label">Model</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">
+        {% if run.status == "completed" %}<span class="success">{{ run.status }}</span>
+        {% else if run.status == "running" %}<span class="warning">{{ run.status }}</span>
+        {% else %}<span class="error-msg">{{ run.status }}</span>{% endif %}
+      </div>
+      <div class="metric-label">Status</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ param_count }}</div>
+      <div class="metric-label">Parameters</div>
+    </div>
+    {% match run.best_epoch %}{% when Some with (e) %}
+    <div class="metric-box">
+      <div class="metric">{{ e }}</div>
+      <div class="metric-label">Best Epoch</div>
+    </div>
+    {% when None %}{% endmatch %}
+    {% match run.training_time_secs %}{% when Some with (t) %}
+    <div class="metric-box">
+      <div class="metric">{{ t }}s</div>
+      <div class="metric-label">Duration</div>
+    </div>
+    {% when None %}{% endmatch %}
+  </div>
+</div>
+
+<div class="card" style="padding-bottom:0.5rem;">
+  <h2 style="margin:0 0 0.5rem">Training History</h2>
+  <div id="history-chart" style="width:100%; height:550px;"></div>
+</div>
+
+<script>
+(function() {
+  var raw = {{ history_json|safe }};
+  if (!raw || !raw.train_losses || typeof Plotly === 'undefined') return;
+
+  var epochs = raw.train_losses.map(function(_, i) { return i + 1; });
+  var valData = (raw.val_losses || []).map(function(v) { return v === null ? null : v; });
+  var lrData = raw.learning_rates || [];
+
+  var traces = [
+    {
+      x: epochs, y: raw.train_losses, name: 'Train Loss', yaxis: 'y',
+      type: 'scatter', mode: 'lines',
+      line: { color: '#2563eb', width: 1.5 },
+      hovertemplate: 'Epoch %{x}<br>Train Loss: %{y:.5g}<extra></extra>'
+    },
+    {
+      x: epochs, y: valData, name: 'Val Loss', yaxis: 'y',
+      type: 'scatter', mode: 'lines', connectgaps: false,
+      line: { color: '#dc2626', width: 1.5 },
+      hovertemplate: 'Epoch %{x}<br>Val Loss: %{y:.5g}<extra></extra>'
+    },
+    {
+      x: epochs, y: lrData, name: 'Learning Rate', yaxis: 'y2',
+      type: 'scatter', mode: 'lines',
+      line: { color: '#16a34a', width: 1, dash: 'dot' },
+      hovertemplate: 'Epoch %{x}<br>LR: %{y:.3e}<extra></extra>'
+    }
+  ];
+
+  var layout = {
+    margin: { t: 10, r: 60, b: 50, l: 70 },
+    font: { family: "'JetBrains Mono', monospace", size: 11 },
+    hovermode: 'x unified',
+    legend: { orientation: 'h', y: -0.12, x: 0.5, xanchor: 'center' },
+    xaxis: { title: 'Epoch' },
+    yaxis: { title: 'Loss', type: 'log', side: 'left' },
+    yaxis2: { title: 'Learning Rate', type: 'log', side: 'right', overlaying: 'y', showgrid: false }
+  };
+
+  var config = {
+    responsive: true,
+    displayModeBar: true,
+    modeBarButtonsToAdd: [
+      {
+        name: 'Toggle Log/Linear',
+        icon: Plotly.Icons.drawline,
+        click: function(gd) {
+          var isLog = gd.layout.yaxis.type === 'log';
+          Plotly.relayout(gd, {
+            'yaxis.type': isLog ? 'linear' : 'log',
+            'yaxis.title': isLog ? 'Loss' : 'Loss (log)',
+            'yaxis2.type': isLog ? 'linear' : 'log'
+          });
+        }
+      }
+    ],
+    toImageButtonOptions: { format: 'png', filename: 'training_history', scale: 2 }
+  };
+
+  Plotly.newPlot('history-chart', traces, layout, config).then(function() {
+    // Fix stretched layout on HTMX navigation (container not yet at final size)
+    setTimeout(function() { Plotly.Plots.resize('history-chart'); }, 100);
+  });
+})();
+</script>
+
+<div class="card">
+  <h2>Training Configuration</h2>
+  <pre style="background:#f1f5f9; padding:1rem; border-radius:0.375rem; font-size:0.8rem; overflow-x:auto; white-space:pre-wrap;">{{ config_json }}</pre>
+</div>
+
+<div class="card">
+  <h2>Metrics</h2>
+  <pre style="background:#f1f5f9; padding:1rem; border-radius:0.375rem; font-size:0.8rem; overflow-x:auto; white-space:pre-wrap;">{{ metrics_json }}</pre>
+</div>
+
+{% if !plots.is_empty() %}
+<div class="card">
+  <h2>Plots</h2>
+  <div class="plot-grid">
+    {% for p in plots %}
+    <div>
+      <h3>{{ p.title }}</h3>
+      <img src="{{ p.url }}" alt="{{ p.title }}" loading="lazy">
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<a href="/" class="btn btn-secondary" style="margin-top:0.5rem">Back to Dashboard</a>
+{% endblock %}

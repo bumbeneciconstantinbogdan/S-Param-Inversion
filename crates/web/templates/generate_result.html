@@ -1,0 +1,21 @@
+<div class="card" style="border-color:#16a34a; background:#f0fdf4;">
+  <h2 class="success" style="margin-bottom:0.75rem">Dataset Generated</h2>
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="metric">{{ train_samples }}</div>
+      <div class="metric-label">Training</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ val_samples }}</div>
+      <div class="metric-label">Validation</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric">{{ test_samples }}</div>
+      <div class="metric-label">Test</div>
+    </div>
+  </div>
+  <button class="btn btn-secondary" style="margin-top:0.75rem"
+    hx-get="/datasets/{{ dataset_id }}/preview" hx-target="#result" hx-swap="innerHTML">
+    Preview Data
+  </button>
+</div>

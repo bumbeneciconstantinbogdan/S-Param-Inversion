@@ -1,0 +1,20 @@
+{
+  "eps_prime_range": [
+    1.0,
+    200.0
+  ],
+  "eps_secund_range": [
+    0.0,
+    100.0
+  ],
+  "grid_nx": 200,
+  "grid_ny": 100,
+  "train_ratio": 0.8,
+  "frequency": 8200000000.0,
+  "waveguide_width": 0.02286,
+  "sample_thickness": 0.0015,
+  "seed": 42,
+  "train_samples": 20000,
+  "val_samples": 2450,
+  "test_samples": 2450
+}

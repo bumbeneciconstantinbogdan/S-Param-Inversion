@@ -1,0 +1,35 @@
+[package]
+name = "sparam-core"
+edition.workspace = true
+version.workspace = true
+
+[features]
+default = ["tensor"]
+tensor = ["dep:candle-core"]
+# Pulls in `candle-nn` so the `determinism` module compiles.  The
+# module sits in `sparam-core` (rather than `sparam-training`) to
+# break a dev-dep cycle: `sparam-models` tests need
+# `deterministic_reinit_varmap`, but `training` already depends on
+# `models` for production code, so a `models -> training` dev-dep
+# would form a logical cycle.  Hosting the utility one layer down
+# (in `sparam-core`) lets both crates pull from the same source.
+varmap = ["tensor", "dep:candle-nn"]
+cli = ["dep:clap"]
+# Opt-in surface for cross-crate test utilities (`test_seed_lock`,
+# future test fixtures). Enabled by dev-dependencies only.
+testing = []
+
+[dependencies]
+thiserror = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+tempfile = { workspace = true }

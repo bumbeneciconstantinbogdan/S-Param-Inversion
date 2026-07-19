@@ -1,0 +1,115 @@
+[package]
+name = "sparam-web"
+edition.workspace = true
+version.workspace = true
+default-run = "sparam-web"
+
+[[bin]]
+name = "sparam-web"
+path = "src/main.rs"
+
+[[bin]]
+name = "migration_benchmark"
+path = "../../poster/studies/scripts/migration_benchmark.rs"
+
+[[bin]]
+name = "extract_bests"
+path = "src/bin/extract_bests.rs"
+
+[[bin]]
+name = "m03_matched_params"
+path = "../../poster/studies/methodology/scripts/m03_matched_params.rs"
+
+[[bin]]
+name = "m06_activation_sweep"
+path = "../../poster/studies/methodology/scripts/m06_activation_sweep.rs"
+
+[[bin]]
+name = "m06_missing_activations"
+path = "../../poster/studies/methodology/scripts/m06_missing_activations.rs"
+
+[[bin]]
+name = "m_cswish_anchor_swap"
+path = "../../poster/studies/methodology/scripts/m_cswish_anchor_swap.rs"
+
+[[bin]]
+name = "sqrt_branch_impact"
+path = "../../poster/studies/scripts/sqrt_branch_impact.rs"
+
+[[bin]]
+name = "m04_clamp"
+path = "../../poster/studies/methodology/scripts/m04_clamp.rs"
+
+[[bin]]
+name = "m07_old_vs_new"
+path = "../../poster/studies/methodology/scripts/m07_old_vs_new.rs"
+
+[[bin]]
+name = "m08_real_pinn"
+path = "../../poster/studies/methodology/scripts/m08_real_pinn.rs"
+
+[[bin]]
+name = "m08_complex_unsup"
+path = "../../poster/studies/methodology/scripts/m08_complex_unsup.rs"
+
+[[bin]]
+name = "m08_real_unsup"
+path = "../../poster/studies/methodology/scripts/m08_real_unsup.rs"
+
+[[bin]]
+name = "m09_tail"
+path = "../../poster/studies/methodology/scripts/m09_tail.rs"
+
+[[bin]]
+name = "gen_dense_eval"
+path = "src/bin/gen_dense_eval.rs"
+
+[dependencies]
+sparam-data = { workspace = true }
+sparam-physics = { workspace = true }
+sparam-models = { workspace = true }
+sparam-training = { workspace = true }
+# Architectural contract: the web crate depends on `sparam-app` (the
+# workflow + orchestration layer) and `sparam-core` (errors + utilities
+# every crate touches). ML-stack types (`PermittivitySample`,
+# `EpochMetrics`, `TrainingCallback`, `DataGenerationConfig`) are
+# re-exported through `sparam_app::workflows` to keep this dep list
+# aligned with what the code actually imports. `candle-core` stays
+# because the `WebError` type's `From<candle_core::Error>` impl bridges
+# workflow errors into the HTTP layer — candle's error type is the
+# stack's common error currency.
+sparam-app = { workspace = true }
+sparam-core = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+# `migration_benchmark` calls optimizer::Nsga2Sampler directly so the
+# HPO row in the migration comparison runs the same NSGA-II algorithm
+# Python does (Optuna's NSGAIISampler), measuring pure language overhead.
+optimizer = { workspace = true }
+# Used inside migration_benchmark to read peak resident-set size from
+# the running process via getrusage(2). Pulled in directly here
+# so we don't bloat the workspace's shared dep list.
+libc = "0.2"
+
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+askama = { workspace = true }
+rust-embed = { workspace = true }
+tower-http = { workspace = true }
+mime_guess = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Used by `db::update_training_run_ensemble_weights` /
+# `get_training_run_ensemble_weights` to encode the M10 stack's extra
+# ensemble member weights as a JSON array of strings (sqlite-friendly,
+# inspectable, transport-safe).  The primary member still rides on the
+# raw `weights_blob` column.
+base64 = "0.22"
+
+[dev-dependencies]
+# Tests reach `serde_urlencoded::from_str` directly to exercise the
+# same path Axum's `Form` extractor takes.
+serde_urlencoded = "0.7"

@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}S-Param Inversion UI{% endblock %}
+{% block content %}
+<h1>S-Parameter Inversion UI</h1>
+
+<div style="display:flex; gap:0.5rem; margin-bottom:1.5rem;">
+  <a href="/generate" class="btn btn-primary">Generate Data</a>
+  <a href="/train" class="btn btn-primary">Train Model</a>
+  <a href="/evaluate" class="btn btn-secondary">Evaluate</a>
+  <a href="/infer" class="btn btn-secondary">Inference</a>
+</div>
+
+<h2>Datasets</h2>
+{% if datasets.is_empty() %}
+<div class="card" style="color:#64748b; text-align:center; padding:2rem;">
+  No datasets yet. <a href="/generate">Generate one</a>.
+</div>
+{% else %}
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Train</th><th>Val</th><th>Test</th><th>Created</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for d in datasets %}
+      <tr>
+        <td>#{{ d.id }}</td>
+        <td>{{ d.train_samples }}</td>
+        <td>{{ d.val_samples }}</td>
+        <td>{{ d.test_samples }}</td>
+        <td style="color:#64748b">{{ d.created_at }}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-secondary btn-sm"
+            hx-get="/datasets/{{ d.id }}/preview" hx-target="#preview-area" hx-swap="innerHTML">
+            Preview
+          </button>
+          <button class="btn btn-danger btn-sm"
+            hx-delete="/datasets/{{ d.id }}" hx-confirm="Delete this dataset and its files?">
+            Delete
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div id="preview-area"></div>
+
+<h2>Training Runs</h2>
+{% if runs.is_empty() %}
+<div class="card" style="color:#64748b; text-align:center; padding:2rem;">
+  No training runs yet. <a href="/train">Start one</a>.
+</div>
+{% else %}
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>Run</th><th>Model</th><th>Status</th><th>Best Epoch</th><th>Time</th><th>Created</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td>#{{ r.id }}</td>
+        <td>{{ r.model_name }}</td>
+        <td>
+          {% if r.status == "completed" %}<span class="success">{{ r.status }}</span>
+          {% else if r.status == "running" %}<span class="warning">{{ r.status }}</span>
+          {% else %}<span class="error-msg">{{ r.status }}</span>{% endif %}
+        </td>
+        <td>{% match r.best_epoch %}{% when Some with (e) %}{{ e }}{% when None %}-{% endmatch %}</td>
+        <td>{% match r.training_time_secs %}{% when Some with (t) %}{{ t }}s{% when None %}-{% endmatch %}</td>
+        <td style="color:#64748b">{{ r.created_at }}</td>
+        <td style="white-space:nowrap">
+          <a href="/train/{{ r.id }}" class="btn btn-secondary btn-sm">View</a>
+          <button class="btn btn-danger btn-sm"
+            hx-delete="/runs/{{ r.id }}" hx-confirm="Delete this training run and its files?">
+            Delete
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

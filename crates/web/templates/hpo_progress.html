@@ -1,0 +1,148 @@
+<div class="card" id="hpo-card">
+  <h2>HPO Study: {{ name }}</h2>
+  <p style="color:#64748b; font-size:0.875rem; margin-bottom:1rem;">{{ model_type }} | {{ n_trials }} trials</p>
+
+  <div class="metrics-row" style="margin-bottom:1rem;">
+    <div class="metric-box">
+      <div class="metric" id="hpo-progress-count">0/{{ n_trials }}</div>
+      <div class="metric-label">Trials</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="hpo-best-ok">-</div>
+      <div class="metric-label">Best OK@1%</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="hpo-best-loss">-</div>
+      <div class="metric-label">Best Val Loss</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="hpo-feasible">0</div>
+      <div class="metric-label">Feasible</div>
+    </div>
+  </div>
+
+  <div class="progress-bar" style="margin-bottom:1rem;">
+    <div class="progress-fill" id="hpo-progress-fill" style="width:0%"></div>
+  </div>
+
+  <div style="display:flex; gap:1rem;">
+    <div style="flex:1;">
+      <h3>Pareto Front (3 objectives — 3D + 2D projections)</h3>
+      <div id="pareto-chart"></div>
+    </div>
+  </div>
+
+  <h3 style="margin-top:1rem;">Trial Log</h3>
+  <div style="max-height:200px; overflow-y:auto;">
+    <table id="hpo-trial-log">
+      <thead>
+        <tr><th>#</th><th>Status</th><th>OK@1%</th><th>H</th><th>Params</th><th>Max Err</th><th>Val Loss</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="hpo-status" style="margin-top:1rem;"></div>
+</div>
+
+<script>
+(function() {
+  var total = {{ n_trials }};
+  var bestOk = -1;
+  var bestLoss = Infinity;
+  var feasibleCount = 0;
+
+  // Reusable 3D+2D Pareto chart (see static/app.js). Live trials are
+  // streamed in via `addTrial`; view-switch buttons are on by default.
+  var chart = (typeof window.ParetoChart !== 'undefined')
+    ? window.ParetoChart.create(
+        document.getElementById('pareto-chart'), [], {
+          height: 320,
+          initialView: '3d',
+          filenamePrefix: 'pareto_live',
+        })
+    : null;
+
+  // Close any EventSource left over from a previous HPO study on
+  // this page — same rationale as `train_progress.html`. Without
+  // this, overlapping studies would double-post trial events and
+  // the stale stream would outlive the DOM it owned.
+  if (window.__hpoES__) {
+    try { window.__hpoES__.close(); } catch(_) {}
+    window.__hpoES__ = null;
+  }
+  var es = new EventSource('/hpo/{{ study_id }}/sse');
+  window.__hpoES__ = es;
+
+  es.addEventListener('trial', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      if (d.trial == null) return; // skip malformed events
+
+      var ok = d.ok_at_1pct || 0;
+      var vloss = d.val_loss || 0;
+      var maxerr = d.max_error || 0;
+      var hidden = d.hidden_size || 0;
+      var params = d.param_count || 0;
+
+      var pct = (d.trial / total * 100).toFixed(0);
+      document.getElementById('hpo-progress-fill').style.width = pct + '%';
+      document.getElementById('hpo-progress-count').textContent = d.trial + '/' + total;
+
+      if (d.is_feasible) feasibleCount++;
+      document.getElementById('hpo-feasible').textContent = feasibleCount;
+
+      if (ok > bestOk) {
+        bestOk = ok;
+        document.getElementById('hpo-best-ok').textContent = bestOk.toFixed(1) + '%';
+      }
+      if (vloss < bestLoss && vloss > 0) {
+        bestLoss = vloss;
+        document.getElementById('hpo-best-loss').textContent = bestLoss.toFixed(6);
+      }
+
+      if (chart) {
+        chart.addTrial({
+          trial_number: d.trial,
+          model_type: d.model_type,
+          ok: (d.ok_at_1pct != null) ? d.ok_at_1pct : null,
+          param_count: (d.param_count != null) ? d.param_count : null,
+          max_error: (d.max_error != null && isFinite(d.max_error)) ? d.max_error : null,
+          is_feasible: !!d.is_feasible,
+          is_pareto: false,   // Pareto flags are computed after study ends
+        });
+      }
+
+      var tbody = document.querySelector('#hpo-trial-log tbody');
+      var row = document.createElement('tr');
+      row.innerHTML = '<td>' + d.trial + '</td><td>' + (d.status||'-') + '</td><td>' +
+        ok.toFixed(1) + '%</td><td>' + hidden + '</td><td>' +
+        params + '</td><td>' + maxerr.toFixed(1) + '%</td><td>' +
+        vloss.toFixed(6) + '</td>';
+      if (tbody.firstChild) tbody.insertBefore(row, tbody.firstChild);
+      else tbody.appendChild(row);
+    } catch(err) { console.error('HPO SSE parse:', err); }
+  });
+
+  es.addEventListener('complete', function() {
+    es.close();
+    document.getElementById('hpo-progress-fill').style.width = '100%';
+    document.getElementById('hpo-status').innerHTML =
+      '<div class="card" style="border-color:#16a34a;background:#f0fdf4;"><p class="success" style="font-weight:600;">HPO Study Complete!</p><p style="margin-top:0.5rem;"><a href="/hpo">View all studies</a></p></div>';
+  });
+
+  es.addEventListener('hpo_error', function(e) {
+    es.close();
+    try {
+      var d = JSON.parse(e.data);
+      document.getElementById('hpo-status').innerHTML =
+        '<div class="card" style="border-color:#dc2626;background:#fef2f2;"><p class="error-msg" style="font-weight:600;">HPO Error</p><p style="font-size:0.875rem;font-family:monospace;">' +
+        (d.message || 'Unknown error').replace(/</g,'&lt;') + '</p></div>';
+    } catch(err) {}
+  });
+
+  es.onerror = function() {
+    setTimeout(function() { if (es.readyState !== EventSource.OPEN) es.close(); }, 5000);
+  };
+})();
+</script>

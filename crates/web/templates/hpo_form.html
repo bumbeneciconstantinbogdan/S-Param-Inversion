@@ -1,0 +1,640 @@
+{% extends "base.html" %}
+{% block title %}New HPO Study{% endblock %}
+{% block content %}
+<h1>New HPO Study</h1>
+
+{% if datasets.is_empty() %}
+<div class="card" style="color:#64748b; text-align:center; padding:2rem;">
+  No datasets available. <a href="/generate">Generate one first</a>.
+</div>
+{% else %}
+<div class="card" x-data="hpoForm()" x-init="init()">
+  <form hx-post="/hpo" hx-target="#hpo-area" hx-swap="innerHTML" @submit="submitted = true">
+
+    <h2>Study Configuration</h2>
+    <div class="form-grid">
+      <div>
+        <label for="study_name">Study Name</label>
+        <input type="text" id="study_name" name="study_name" value="hpo_study">
+      </div>
+      <div>
+        <label for="dataset_id">Dataset</label>
+        <select name="dataset_id" id="dataset_id">
+          {% for d in datasets %}
+          <option value="{{ d.id }}">Dataset #{{ d.id }} ({{ d.train_samples }} train)</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <h2>Model</h2>
+    <div class="form-grid">
+      <div>
+        <label for="model_type">Model Type</label>
+        <select name="model_type" id="model_type" x-model="modelType">
+          <option value="real">Real MLP</option>
+          <option value="complex">Complex MLP</option>
+          <option value="both">Both (Real + Complex)</option>
+        </select>
+      </div>
+      <div>&nbsp;</div>
+    </div>
+
+    <h2>Search Space
+      <span style="font-size:0.8rem; font-weight:400; color:#64748b; margin-left:0.5rem;">
+        Preset:
+        <button type="button" class="btn btn-sm btn-secondary"
+                @click="applyPreset('default-real')"
+                style="margin-left:0.25rem; color:#1d4ed8;">Default (Real)</button>
+        <button type="button" class="btn btn-sm btn-secondary"
+                @click="applyPreset('default-complex')"
+                style="color:#6d28d9;">Default (Complex)</button>
+        <button type="button" class="btn btn-sm btn-secondary"
+                @click="applyPreset('full')">Full</button>
+      </span>
+    </h2>
+
+    {# Two columns when modelType = 'both', one full-width column
+       otherwise. Colour-coded left border per type. #}
+    <div class="ss-columns" :class="modelType === 'both' ? 'ss-both' : 'ss-single'">
+
+      {# ── Real column ── #}
+      <div class="ss-col ss-col-real" x-show="modelType === 'real' || modelType === 'both'">
+        <div class="ss-col-header" x-show="modelType === 'both'">Real MLP</div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Architecture</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.hidden_sizes_on"> Hidden sizes</label>
+            <div x-show="ss.hidden_sizes_on" class="ss-chips">
+              <template x-for="h in REAL_HIDDEN">
+                <label class="check-label">
+                  <input type="checkbox" :value="h" x-model.number="ss.hidden_sizes"> <span x-text="h"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.activations_on"> Activations</label>
+            <div x-show="ss.activations_on" class="ss-chips">
+              <template x-for="a in ['relu','tanh','gelu','leaky_relu','elu']">
+                <label class="check-label">
+                  <input type="checkbox" :value="a" x-model="ss.activations"> <span x-text="a"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Optimizer</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.optimizers_on"> Optimizers</label>
+            <div x-show="ss.optimizers_on" class="ss-chips">
+              <template x-for="o in ['adam','adamw','sgd','rmsprop','lbfgs']">
+                <label class="check-label" :class="o === 'lbfgs' ? 'disabled' : ''">
+                  <input type="checkbox" :value="o" x-model="ss.optimizers"
+                         :disabled="o === 'lbfgs'"
+                         @click="if (o === 'lbfgs') $event.preventDefault()">
+                  <span x-text="o"></span>
+                  <span x-show="o === 'lbfgs'" class="ss-tooltip"
+                        title="LBFGS was in the Python HPO but isn't ported to the Rust training crate yet. Shown for reference only.">?</span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.lr_on"> Learning rate</label>
+            <div x-show="ss.lr_on" class="ss-range">
+              <input type="text" x-model="ss.lr_min" placeholder="min (e.g. 1e-4)" inputmode="decimal">
+              <input type="text" x-model="ss.lr_max" placeholder="max (e.g. 5e-2)" inputmode="decimal">
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.batch_sizes_on"> Batch sizes</label>
+            <div x-show="ss.batch_sizes_on" class="ss-chips">
+              <template x-for="b in ['8','16','32','64','128','256','512','all']">
+                <label class="check-label">
+                  <input type="checkbox" :value="b" x-model="ss.batch_sizes"> <span x-text="b"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.weight_decay_on"> Weight decay</label>
+            <div x-show="ss.weight_decay_on" class="ss-range">
+              <input type="text" x-model="ss.weight_decay_min" placeholder="min (e.g. 1e-10)" inputmode="decimal">
+              <input type="text" x-model="ss.weight_decay_max" placeholder="max (e.g. 1e-2)" inputmode="decimal">
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.losses_on"> Loss functions</label>
+            <div x-show="ss.losses_on" class="ss-chips">
+              {# Real MLPs get the scale-agnostic losses. The
+                 complex-only physics-forward chip lives in the
+                 Complex section below; mirroring
+                 `sparam_hpo::LossChoice::REAL_COMPATIBLE`. #}
+              <template x-for="l in ['mse','smooth_l1','eps_rel_mse']">
+                <label class="check-label">
+                  <input type="checkbox" :value="l" x-model="ss.losses"> <span x-text="l"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-hint" x-show="ss.optimizers_on && ss.optimizers.includes('sgd')">
+            * Under <code>sgd</code>: <code>momentum ∈ [0, 0.95]</code>,
+            <code>nesterov ∈ {false, true}</code> sampled automatically.
+          </div>
+          <div class="ss-hint" x-show="ss.optimizers_on && ss.optimizers.includes('rmsprop')">
+            * Under <code>rmsprop</code>: <code>momentum ∈ [0, 0.95]</code>,
+            <code>alpha ∈ [0.85, 0.99]</code> sampled automatically.
+          </div>
+        </div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Regularization</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.dropout_on"> Search dropout</label>
+            <div x-show="ss.dropout_on" class="ss-range">
+              <input type="number" x-model.number="ss.dropout_min" min="0" max="1" step="0.01" placeholder="min (0–1)">
+              <input type="number" x-model.number="ss.dropout_max" min="0" max="1" step="0.01" placeholder="max (0–1)">
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.norms_on"> Search normalization</label>
+            <div x-show="ss.norms_on" class="ss-chips">
+              <template x-for="n in ['none','layernorm','batchnorm']">
+                <label class="check-label">
+                  <input type="checkbox" :value="n" x-model="ss.norms"> <span x-text="n"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.grad_clips_on"> Search gradient clipping</label>
+            <div class="ss-hint" x-show="ss.grad_clips_on">
+              * Sampled from <code>{None, 0.5, 1.0, 5.0}</code>
+              (2.0 dropped after the prior 10000-trial study found it
+              never reached the top-200).
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.noise_on"> Search input noise</label>
+            <div class="ss-hint" x-show="ss.noise_on">
+              * Sampled <code>input_noise_std ∈ [0, 0.01]</code>.
+            </div>
+          </div>
+        </div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Scheduler</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.schedulers_on"> Schedulers</label>
+            <div x-show="ss.schedulers_on" class="ss-chips">
+              <template x-for="s in ['none','cosine','plateau']">
+                <label class="check-label">
+                  <input type="checkbox" :value="s" x-model="ss.schedulers"> <span x-text="s"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-hint" x-show="ss.schedulers_on && ss.schedulers.includes('plateau')">
+            * Under <code>plateau</code>: <code>factor ∈ [0.2, 0.8]</code>,
+            <code>patience ∈ [2, 8]</code>, <code>min_lr ∈ [1e-6, 1e-4]</code> log.
+          </div>
+          <div class="ss-hint" x-show="ss.schedulers_on && ss.schedulers.includes('cosine')">
+            * Under <code>cosine</code>: <code>eta_min ∈ [1e-6, 1e-4]</code> log.
+          </div>
+        </div>
+      </div>
+
+      {# ── Complex column ── #}
+      <div class="ss-col ss-col-complex" x-show="modelType === 'complex' || modelType === 'both'">
+        <div class="ss-col-header" x-show="modelType === 'both'">Complex MLP</div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Architecture</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_hidden_sizes_on"> Hidden sizes</label>
+            <div x-show="ss.complex_hidden_sizes_on" class="ss-chips">
+              <template x-for="h in COMPLEX_HIDDEN">
+                <label class="check-label">
+                  <input type="checkbox" :value="h" x-model.number="ss.complex_hidden_sizes"> <span x-text="h"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_acts_on"> Activations</label>
+            <div x-show="ss.complex_acts_on" class="ss-chips">
+              {# Narrowed to the 3 Complex activations that dominated
+                 the prior 10000-trial study after the architecture
+                 port — crelu/modrelu/lpma/cswish_phase/worelu were
+                 either uncompetitive or unstable. #}
+              <template x-for="a in ['hybrid_cardioid_gelu','cgelu','cardioid']">
+                <label class="check-label">
+                  <input type="checkbox" :value="a" x-model="ss.complex_activations"> <span x-text="a"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Optimizer</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_optimizers_on"> Optimizers</label>
+            <div x-show="ss.complex_optimizers_on" class="ss-chips">
+              <template x-for="o in ['adam','adamw','sgd','rmsprop']">
+                <label class="check-label">
+                  <input type="checkbox" :value="o" x-model="ss.complex_optimizers"> <span x-text="o"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_lr_on"> Learning rate</label>
+            <div x-show="ss.complex_lr_on" class="ss-range">
+              <input type="text" x-model="ss.complex_lr_min" placeholder="min (e.g. 3e-3)" inputmode="decimal">
+              <input type="text" x-model="ss.complex_lr_max" placeholder="max (e.g. 2.5e-2)" inputmode="decimal">
+            </div>
+            <div class="ss-hint" x-show="ss.complex_lr_on">
+              Default Complex range is <code>log [3e-3, 2.5e-2]</code> —
+              the dense quantile of the top-200 from the prior study.
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_batch_sizes_on"> Batch sizes</label>
+            <div x-show="ss.complex_batch_sizes_on" class="ss-chips">
+              <template x-for="b in ['8','16','32','64','128','256','512','all']">
+                <label class="check-label">
+                  <input type="checkbox" :value="b" x-model="ss.complex_batch_sizes"> <span x-text="b"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_losses_on"> Loss functions</label>
+            <div x-show="ss.complex_losses_on" class="ss-chips">
+              {# Complex losses: complex MSE / Smooth-L1 dispatch to
+                 the complex kernels via the model-aware loss factory.
+                 PhysicsForward adds the hybrid PINN regulariser; its
+                 mixing weight λ is sampled from log [1e-3, 1] when
+                 the trial picks `physics_forward`. #}
+              <template x-for="l in ['mse','smooth_l1','physics_forward']">
+                <label class="check-label">
+                  <input type="checkbox" :value="l" x-model="ss.complex_losses"> <span x-text="l"></span>
+                </label>
+              </template>
+            </div>
+            <div class="ss-hint" x-show="ss.complex_losses_on && ss.complex_losses.includes('physics_forward')" style="margin-top:0.35rem;">
+              Physics-forward is now <em>hybrid</em>: <code>L = base + λ · NRW_residual</code>.
+              The base term is whatever residual loss the complex
+              kernel computes (complex MSE), and λ is sampled from
+              <code>log [1e-3, 1]</code> per trial. The NRW forward
+              model itself is fixed (always-on stable-sqrt path).
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_weight_decay_on"> Weight decay</label>
+            <div x-show="ss.complex_weight_decay_on" class="ss-range">
+              <input type="text" x-model="ss.complex_weight_decay_min" placeholder="min (e.g. 1e-8)" inputmode="decimal">
+              <input type="text" x-model="ss.complex_weight_decay_max" placeholder="max (e.g. 1e-5)" inputmode="decimal">
+            </div>
+            <div class="ss-hint" x-show="ss.complex_weight_decay_on">
+              Default Complex range is <code>log [1e-8, 1e-5]</code>.
+            </div>
+          </div>
+          <div class="ss-hint" x-show="ss.complex_optimizers_on && ss.complex_optimizers.includes('sgd')">
+            * Under <code>sgd</code>: <code>momentum ∈ [0, 0.95]</code>,
+            <code>nesterov ∈ {false, true}</code> sampled automatically.
+          </div>
+          <div class="ss-hint" x-show="ss.complex_optimizers_on && ss.complex_optimizers.includes('rmsprop')">
+            * Under <code>rmsprop</code>: <code>momentum ∈ [0, 0.95]</code>,
+            <code>alpha ∈ [0.85, 0.99]</code> sampled automatically.
+          </div>
+        </div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Regularization</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_dropout_on"> Search dropout</label>
+            <div x-show="ss.complex_dropout_on" class="ss-range">
+              <input type="text" x-model.number="ss.complex_dropout_min" placeholder="min (0.0)" inputmode="decimal">
+              <input type="text" x-model.number="ss.complex_dropout_max" placeholder="max (e.g. 0.05)" inputmode="decimal">
+            </div>
+            <div class="ss-hint" x-show="ss.complex_dropout_on">
+              Pair-wise complex dropout (drops whole <code>(real, imag)</code>
+              pairs so phase stays coherent). Default range is
+              <code>[0.0, 0.05]</code> — narrowed from the prior wider
+              search after observing top trials cluster near 0.01.
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_grad_clips_on"> Search gradient clipping</label>
+            <div class="ss-hint" x-show="ss.complex_grad_clips_on">
+              When on, HPO samples <code>max_grad_norm</code> from
+              <code>{none, 0.5, 1.0, 5.0}</code> (2.0 was dropped after
+              the prior study showed it never made the top-200).
+            </div>
+          </div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_noise_on"> Search input noise</label>
+            <div class="ss-hint" x-show="ss.complex_noise_on">
+              Gaussian noise added to the packed <code>[Re, Im]</code>
+              input before the forward pass. Default range is
+              <code>std ∈ [0.0, 0.008]</code> — narrowed to the dense
+              quantile.
+            </div>
+          </div>
+          <div class="ss-hint" style="margin-top:0.35rem">
+            Per-half LayerNorm (separate γ/β on real and imag),
+            architectural softplus output clamp (<code>ε′ ≥ 1</code>,
+            <code>Im(ε) ≤ 0</code>), and the stable-sqrt NRW path are
+            <em>always on</em> for the Complex MLP — they're not search
+            dimensions any more.
+          </div>
+        </div>
+
+        <div class="ss-section">
+          <div class="ss-section-title">Scheduler</div>
+          <div class="ss-field">
+            <label class="check-label"><input type="checkbox" x-model="ss.complex_schedulers_on"> Schedulers</label>
+            <div x-show="ss.complex_schedulers_on" class="ss-chips">
+              <template x-for="s in ['none','cosine','plateau']">
+                <label class="check-label">
+                  <input type="checkbox" :value="s" x-model="ss.complex_schedulers"> <span x-text="s"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ss-hint" x-show="ss.complex_schedulers_on && ss.complex_schedulers.includes('plateau')">
+            * Under <code>plateau</code>: <code>factor ∈ [0.2, 0.8]</code>,
+            <code>patience ∈ [2, 8]</code>, <code>min_lr ∈ [1e-6, 1e-4]</code> log.
+          </div>
+          <div class="ss-hint" x-show="ss.complex_schedulers_on && ss.complex_schedulers.includes('cosine')">
+            * Under <code>cosine</code>: <code>eta_min ∈ [1e-6, 5e-5]</code> log
+            (narrowed from the wider Real range to match the dense
+            quantile of the prior top-200).
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Hidden field carries the JSON search space config -->
+    <input type="hidden" name="search_space_json" :value="buildSearchSpaceJson()">
+
+    <h2>Budget</h2>
+    <div class="form-grid">
+      <div>
+        <label for="n_trials">Trials <span x-show="modelType==='both'" style="color:#64748b;font-size:0.8rem">(per model type, total: <span x-text="nTrials*2"></span>)</span></label>
+        <input type="number" id="n_trials" name="n_trials" x-model.number="nTrials" min="5">
+      </div>
+      <div>
+        <label for="max_epochs">Max Epochs per Trial</label>
+        <input type="number" id="max_epochs" name="max_epochs" value="25" min="5" max="500">
+      </div>
+      <div>
+        <label for="n_jobs">Parallel Workers (0 = auto)</label>
+        <input type="number" id="n_jobs" name="n_jobs" value="0" min="0" max="32">
+      </div>
+      <div>
+        <label for="patience">Early Stopping Patience</label>
+        <input type="number" id="patience" name="patience" value="10" min="1" max="1000">
+      </div>
+      <div>
+        <label for="warmup_epochs">Warmup Epochs</label>
+        <input type="number" id="warmup_epochs" name="warmup_epochs" value="10" min="0" max="1000">
+      </div>
+      <div>
+        <label for="seed">Random seed
+          <span style="color:#64748b;font-weight:400;font-size:0.78rem">(drives sampler + per-trial init)</span>
+        </label>
+        <input type="number" id="seed" name="seed" value="42" min="0" max="4294967295">
+      </div>
+    </div>
+
+    <button type="submit" class="btn btn-primary"
+            :disabled="submitted"
+            style="margin-top:1rem"
+            x-text="submitted ? 'HPO Running…' : 'Start HPO Study'"></button>
+  </form>
+</div>
+
+<script>
+// Must match MlpSearchSpace::for_real / for_complex defaults. Hidden
+// sizes and activations are type-specific: Real and Complex MLPs need
+// different widths and activation families, and the backend filters
+// activations by type (see `build_custom_search_space`). Do NOT merge
+// these into a combined list — doing so leaks Complex sizes into Real
+// trials (and vice versa).
+const REAL_HIDDEN    = [8, 16, 32, 64];
+const COMPLEX_HIDDEN = [6, 12, 24, 48];
+const REAL_ACTS      = ['relu', 'tanh', 'gelu', 'leaky_relu', 'elu'];
+const COMPLEX_ACTS   = ['hybrid_cardioid_gelu', 'cgelu', 'cardioid'];
+
+// Factory for the default Alpine state. Used as the form's initial
+// `ss` and by every `applyPreset(...)` branch; `overrides` customises
+// individual fields while everything else stays on its default.
+function defaultSearchSpaceState(overrides) {
+  var s = {
+    // Real / base (also applies to Complex when no complex_* override).
+    hidden_sizes_on: true, hidden_sizes: REAL_HIDDEN.slice(),
+    activations_on: true, activations: REAL_ACTS.slice(),
+    optimizers_on: true, optimizers: ['adam', 'adamw'],
+    lr_on: true, lr_min: '1e-4', lr_max: '5e-2',
+    weight_decay_on: false, weight_decay_min: '1e-10', weight_decay_max: '1e-2',
+    batch_sizes_on: true, batch_sizes: ['8', '16', '32', '64', '128', '256', '512'],
+    losses_on: true, losses: ['mse'],
+    dropout_on: false, dropout_min: 0.0, dropout_max: 0.4,
+    norms_on: false, norms: ['none', 'layernorm', 'batchnorm'],
+    grad_clips_on: false, noise_on: false,
+    schedulers_on: true, schedulers: ['cosine'],
+
+    // Complex overrides. Weight decay, dropout, gradient clipping and
+    // input noise now have dedicated Complex chips — each `_on`
+    // defaults to `false` so the default search space stays the same
+    // size as before, and users opt in when they want to explore the
+    // regularization dimensions on the Complex path.
+    complex_hidden_sizes_on: true, complex_hidden_sizes: COMPLEX_HIDDEN.slice(),
+    complex_acts_on: true, complex_activations: COMPLEX_ACTS.slice(),
+    complex_optimizers_on: true, complex_optimizers: ['adam', 'adamw'],
+    // Complex defaults narrowed to the dense quantile of the prior
+    // top-200; widen via the "Full" preset if you want exploratory
+    // sampling instead.
+    complex_lr_on: true, complex_lr_min: '3e-3', complex_lr_max: '2.5e-2',
+    complex_weight_decay_on: false, complex_weight_decay_min: '1e-8', complex_weight_decay_max: '1e-5',
+    complex_batch_sizes_on: true, complex_batch_sizes: ['8', '16', '32', '64', '128', '256', '512'],
+    // Complex losses: complex MSE / Smooth-L1 dispatch through the
+    // model-aware loss factory; PhysicsForward adds the hybrid-PINN
+    // regulariser (its λ is sampled from log [1e-3, 1] per trial).
+    complex_losses_on: true, complex_losses: ['mse', 'smooth_l1', 'physics_forward'],
+    complex_dropout_on: false, complex_dropout_min: 0.0, complex_dropout_max: 0.05,
+    complex_grad_clips_on: false,
+    complex_noise_on: false,
+    complex_schedulers_on: true, complex_schedulers: ['cosine'],
+  };
+  if (overrides) {
+    for (var k in overrides) if (Object.prototype.hasOwnProperty.call(overrides, k)) s[k] = overrides[k];
+  }
+  return s;
+}
+
+function hpoForm() {
+  return {
+    submitted: false,
+    modelType: 'real',
+    nTrials: 50,
+    REAL_HIDDEN: REAL_HIDDEN,
+    COMPLEX_HIDDEN: COMPLEX_HIDDEN,
+    ss: defaultSearchSpaceState(),
+    init() {
+      // Intentionally no `$watch('modelType', ...)`: a previous version
+      // reset `hidden_sizes` / `activations` / their complex_* twins
+      // whenever modelType changed, silently wiping user customisations
+      // on every dropdown flip (e.g. peeking at 'both' and back to 'real'
+      // would erase picks). Defaults are seeded once in
+      // `defaultSearchSpaceState`; presets explicitly replace state.
+    },
+    applyPreset(name) {
+      // Every preset seeds BOTH columns so that switching modelType
+      // to 'both' later doesn't leave one side empty.
+      var wide = {
+        optimizers: ['adam', 'adamw', 'sgd', 'rmsprop'],
+        batch_sizes: ['8', '16', '32', '64', '128', '256', '512', 'all'],
+        // Real path keeps the three shape-agnostic losses; Complex
+        // path now offers complex MSE / Smooth-L1 plus hybrid PINN
+        // (physics-forward with sampled λ).
+        real_losses: ['mse', 'smooth_l1', 'eps_rel_mse'],
+        complex_losses: ['mse', 'smooth_l1', 'physics_forward'],
+        schedulers: ['none', 'cosine', 'plateau'],
+      };
+      var overrides = {
+        optimizers: wide.optimizers, batch_sizes: wide.batch_sizes,
+        losses: wide.real_losses, schedulers: wide.schedulers,
+        // Fixed 2026-04-23: the "full" preset previously didn't set
+        // `weight_decay_on`, which kept it at the default-state `false`
+        // so weight decay stayed unticked after clicking Full. Turn it
+        // on unconditionally — the preset's point is "everything on".
+        weight_decay_on: true,
+        dropout_on: true, norms_on: true, grad_clips_on: true, noise_on: true,
+        complex_optimizers: wide.optimizers, complex_batch_sizes: wide.batch_sizes,
+        complex_losses: wide.complex_losses, complex_schedulers: wide.schedulers,
+        complex_weight_decay_on: true,
+        complex_dropout_on: true, complex_grad_clips_on: true, complex_noise_on: true,
+      };
+
+      if (name === 'default-real') {
+        this.modelType = 'real';
+        this.ss = defaultSearchSpaceState(overrides);
+      } else if (name === 'default-complex') {
+        this.modelType = 'complex';
+        this.ss = defaultSearchSpaceState(overrides);
+      } else if (name === 'full') {
+        // "Full" = every searchable knob the form exposes on, with the
+        // widest default ranges. Each side stays strictly typed:
+        // Real gets REAL_HIDDEN, Complex gets COMPLEX_HIDDEN — merging
+        // them into a single FULL_HIDDEN would leak Complex-only sizes
+        // (6, 12, 24, 48) into Real trials and vice versa, and the UI
+        // chips (which only render REAL_HIDDEN in the Real column) can't
+        // expose the leaked values for the user to untick. Hidden sizes
+        // and activations are type-specific and must not cross over.
+        var fullOverrides = Object.assign({}, overrides, {
+          hidden_sizes: REAL_HIDDEN.slice(),
+          complex_hidden_sizes: COMPLEX_HIDDEN.slice(),
+        });
+        this.ss = defaultSearchSpaceState(fullOverrides);
+      }
+    },
+    buildSearchSpaceJson() {
+      var cfg = {};
+
+      if (this.ss.hidden_sizes_on && this.ss.hidden_sizes.length > 0)
+        cfg.hidden_sizes = this.ss.hidden_sizes.map(Number);
+      if (this.ss.activations_on && this.ss.activations.length > 0)
+        cfg.activations = this.ss.activations;
+      if (this.ss.optimizers_on && this.ss.optimizers.length > 0) {
+        // LBFGS chip is disabled; filter defensively anyway.
+        cfg.optimizers = this.ss.optimizers.filter(function(o){ return o !== 'lbfgs'; });
+      }
+      if (this.ss.lr_on) {
+        cfg.lr_min = parseFloat(this.ss.lr_min) || 1e-4;
+        cfg.lr_max = parseFloat(this.ss.lr_max) || 5e-2;
+      }
+      if (this.ss.weight_decay_on) {
+        cfg.weight_decay_min = parseFloat(this.ss.weight_decay_min) || 1e-10;
+        cfg.weight_decay_max = parseFloat(this.ss.weight_decay_max) || 1e-2;
+      }
+      if (this.ss.batch_sizes_on && this.ss.batch_sizes.length > 0)
+        cfg.batch_sizes = this.ss.batch_sizes;
+      if (this.ss.losses_on && this.ss.losses.length > 0)
+        cfg.losses = this.ss.losses;
+      cfg.dropout_enabled = this.ss.dropout_on;
+      if (this.ss.dropout_on) {
+        var dmin = Math.min(Math.max(this.ss.dropout_min || 0, 0), 1);
+        var dmax = Math.min(Math.max(this.ss.dropout_max || 0, 0), 1);
+        if (dmax < dmin) dmax = dmin;
+        cfg.dropout_min = dmin;
+        cfg.dropout_max = dmax;
+      }
+      // `norms` subset: when the user ticks the toggle, send the
+      // selected variants (empty-list falls back to all-on in the
+      // backend). When the toggle is off, force `[none]` — matches
+      // the pre-subset toggle semantics.
+      if (this.ss.norms_on) {
+        if (this.ss.norms && this.ss.norms.length > 0) cfg.norms = this.ss.norms;
+      } else {
+        cfg.norms = ['none'];
+      }
+      if (!this.ss.grad_clips_on) cfg.grad_clips = ['none'];
+      cfg.noise_enabled = this.ss.noise_on;
+      if (this.ss.schedulers_on && this.ss.schedulers.length > 0)
+        cfg.schedulers = this.ss.schedulers;
+
+      // Complex overrides — only emitted when a Complex trial will
+      // actually run. Regularization knobs (weight decay, dropout,
+      // grad clip, input noise) ARE now duplicated: each has its own
+      // `complex_*` override that takes precedence over the base
+      // field via `SearchSpaceConfig::effective`.
+      if (this.modelType === 'complex' || this.modelType === 'both') {
+        if (this.ss.complex_hidden_sizes_on && this.ss.complex_hidden_sizes.length > 0)
+          cfg.complex_hidden_sizes = this.ss.complex_hidden_sizes.map(Number);
+        if (this.ss.complex_acts_on && this.ss.complex_activations.length > 0)
+          cfg.complex_activations = this.ss.complex_activations;
+        if (this.ss.complex_optimizers_on && this.ss.complex_optimizers.length > 0)
+          cfg.complex_optimizers = this.ss.complex_optimizers;
+        if (this.ss.complex_lr_on) {
+          cfg.complex_lr_min = parseFloat(this.ss.complex_lr_min) || 3e-3;
+          cfg.complex_lr_max = parseFloat(this.ss.complex_lr_max) || 2.5e-2;
+        }
+        if (this.ss.complex_weight_decay_on) {
+          cfg.complex_weight_decay_min = parseFloat(this.ss.complex_weight_decay_min) || 1e-8;
+          cfg.complex_weight_decay_max = parseFloat(this.ss.complex_weight_decay_max) || 1e-5;
+        }
+        if (this.ss.complex_batch_sizes_on && this.ss.complex_batch_sizes.length > 0)
+          cfg.complex_batch_sizes = this.ss.complex_batch_sizes;
+        if (this.ss.complex_losses_on && this.ss.complex_losses.length > 0)
+          cfg.complex_losses = this.ss.complex_losses;
+        cfg.complex_dropout_enabled = this.ss.complex_dropout_on;
+        if (this.ss.complex_dropout_on) {
+          var cdmin = Math.min(Math.max(this.ss.complex_dropout_min || 0, 0), 1);
+          var cdmax = Math.min(Math.max(this.ss.complex_dropout_max || 0, 0), 1);
+          if (cdmax < cdmin) cdmax = cdmin;
+          cfg.complex_dropout_min = cdmin;
+          cfg.complex_dropout_max = cdmax;
+        }
+        if (!this.ss.complex_grad_clips_on) cfg.complex_grad_clips = ['none'];
+        cfg.complex_noise_enabled = this.ss.complex_noise_on;
+        if (this.ss.complex_schedulers_on && this.ss.complex_schedulers.length > 0)
+          cfg.complex_schedulers = this.ss.complex_schedulers;
+      }
+      return JSON.stringify(cfg);
+    }
+  };
+}
+</script>
+{% endif %}
+
+<div id="hpo-area"></div>
+{% endblock %}

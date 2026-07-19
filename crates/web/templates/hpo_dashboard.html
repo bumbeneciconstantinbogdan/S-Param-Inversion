@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}HPO - S-PARAM UI{% endblock %}
+{% block content %}
+<h1>Hyperparameter Optimization</h1>
+
+<a href="/hpo/new" class="btn btn-primary" style="margin-bottom:1.5rem;">New HPO Study</a>
+
+{% if studies.is_empty() %}
+<div class="card" style="color:#64748b; text-align:center; padding:2rem;">
+  No HPO studies yet. <a href="/hpo/new">Create one</a>.
+</div>
+{% else %}
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>Study</th><th>Model</th><th>Progress</th><th>Feasible</th><th>Pareto</th><th>Time</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for s in studies %}
+      <tr>
+        <td><a href="/hpo/{{ s.id }}">{{ s.name }}</a></td>
+        <td>{{ s.model_type }}</td>
+        <td>{{ s.n_completed }}/{{ s.n_trials }}</td>
+        <td>{{ s.n_feasible }}</td>
+        <td>{{ s.pareto_size }}</td>
+        <td>{% match s.total_time_secs %}{% when Some with (t) %}{{ t }}s{% when None %}-{% endmatch %}</td>
+        <td>
+          {% if s.status == "completed" %}<span class="success">{{ s.status }}</span>
+          {% else if s.status == "running" %}<span class="warning">{{ s.status }}</span>
+          {% else %}<span class="error-msg">{{ s.status }}</span>{% endif %}
+        </td>
+        <td>
+          <a href="/hpo/{{ s.id }}" class="btn btn-secondary btn-sm">View</a>
+          <button class="btn btn-danger btn-sm"
+            hx-delete="/hpo/{{ s.id }}" hx-confirm="Delete this HPO study?">Delete</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,44 @@
+<div class="card">
+  <h2>Dataset #{{ dataset_id }} Preview</h2>
+
+  {% for split in splits %}
+  <h3>{{ split.name }} ({{ split.count }} samples)</h3>
+  <table style="margin-bottom:1rem;">
+    <thead>
+      <tr><th>Column</th><th>Min</th><th>Max</th><th>Mean</th><th>Std</th></tr>
+    </thead>
+    <tbody>
+      {% for s in split.columns %}
+      <tr>
+        <td style="font-weight:500">{{ s.name }}</td>
+        <td>{{ s.min }}</td>
+        <td>{{ s.max }}</td>
+        <td>{{ s.mean }}</td>
+        <td>{{ s.std }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
+
+  <h3>Sample Rows (first 10 training)</h3>
+  <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr><th>S11 real</th><th>S11 imag</th><th>S21 real</th><th>S21 imag</th><th>eps'</th><th>eps''</th></tr>
+      </thead>
+      <tbody>
+        {% for row in sample_rows %}
+        <tr>
+          <td>{{ row.s11_real }}</td>
+          <td>{{ row.s11_imag }}</td>
+          <td>{{ row.s21_real }}</td>
+          <td>{{ row.s21_imag }}</td>
+          <td>{{ row.eps_prime }}</td>
+          <td>{{ row.eps_secund }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

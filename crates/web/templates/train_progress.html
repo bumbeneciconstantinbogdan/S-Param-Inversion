@@ -1,0 +1,253 @@
+<div class="card" id="train-card">
+  <h2>Training in Progress</h2>
+  <p style="color:#64748b; font-size:0.875rem; margin-bottom:0.5rem;">{{ config_summary }}</p>
+
+  <!-- stack stage banner: visible only after the first `stage` SSE event
+       arrives.  Lets the user see "Training member 2 of 3" /
+       "Computing ensemble metrics + 100-step NRW refinement…" instead
+       of staring at a frozen graph during the parts of the M10
+       pipeline that don't emit per-epoch events. -->
+  <div id="stage-banner" style="display:none; margin-bottom:0.75rem;
+       padding:0.45rem 0.75rem; background:#eef6ff;
+       border-left:3px solid #2563eb; font-size:12px; color:#1e3a8a;">
+    <span id="stage-text"></span>
+  </div>
+
+  <div class="metrics-row" style="margin-bottom:1rem;">
+    <div class="metric-box">
+      <div class="metric" id="epoch-display">-</div>
+      <div class="metric-label" id="epoch-label">Epoch</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="train-loss-display">-</div>
+      <div class="metric-label">Train Loss</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="val-loss-display">-</div>
+      <div class="metric-label">Val Loss</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric" id="lr-display">-</div>
+      <div class="metric-label">Learning Rate</div>
+    </div>
+  </div>
+
+  <div class="progress-bar" style="margin-bottom:1rem;">
+    <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+  </div>
+
+  <div id="loss-chart" style="width:100%; height:300px;"></div>
+
+  <div id="train-status" style="margin-top:1rem;"></div>
+</div>
+
+<script>
+(function() {
+  // Close any EventSource left over from a previous training run on
+  // this page. htmx's `hx-swap="innerHTML"` replaces the #loss-chart
+  // div but does NOT call close() on an EventSource captured by an
+  // earlier IIFE's closure — those handlers keep firing into the
+  // new DOM and land on a div they don't own, triggering the
+  // "This element is not a Plotly plot" errors.
+  if (window.__trainES__) {
+    try { window.__trainES__.close(); } catch(_) {}
+    window.__trainES__ = null;
+  }
+
+  var el = document.getElementById('loss-chart');
+  if (!el || typeof Plotly === 'undefined') {
+    document.getElementById('train-status').innerHTML =
+      '<p class="warning">Chart library not loaded. Metrics will still update.</p>';
+  }
+
+  var epochsArr = [], trainArr = [], valArr = [], lrArr = [];
+  // Captures the exact DOM node we ran `Plotly.newPlot` on, so the
+  // epoch handler can verify it's still the one `#loss-chart`
+  // resolves to before calling `Plotly.extendTraces`. Guards
+  // against a newer swap having replaced the element under us —
+  // without this check, the old event-loop microtask could still
+  // try to patch the stale node.
+  var plotEl = null;
+
+  function initPlot() {
+    var traces = [
+      { x: epochsArr, y: trainArr, name: 'Train Loss', yaxis: 'y', type: 'scatter', mode: 'lines', line: { color: '#2563eb', width: 1.5 } },
+      { x: epochsArr, y: valArr, name: 'Val Loss', yaxis: 'y', type: 'scatter', mode: 'lines', connectgaps: false, line: { color: '#dc2626', width: 1.5 } },
+      { x: epochsArr, y: lrArr, name: 'Learning Rate', yaxis: 'y2', type: 'scatter', mode: 'lines', line: { color: '#16a34a', width: 1, dash: 'dot' } }
+    ];
+    var layout = {
+      margin: { t: 10, r: 55, b: 40, l: 60 },
+      font: { family: "'JetBrains Mono', monospace", size: 10 },
+      hovermode: 'x unified',
+      legend: { orientation: 'h', y: -0.18, x: 0.5, xanchor: 'center' },
+      xaxis: { title: 'Epoch' },
+      yaxis: { title: 'Loss', type: 'log', side: 'left' },
+      yaxis2: { title: 'LR', type: 'log', side: 'right', overlaying: 'y', showgrid: false }
+    };
+    var config = {
+      responsive: true, displayModeBar: true,
+      modeBarButtonsToAdd: [{
+        name: 'Toggle Log/Linear',
+        icon: Plotly.Icons.drawline,
+        click: function(gd) {
+          var isLog = gd.layout.yaxis.type === 'log';
+          Plotly.relayout(gd, { 'yaxis.type': isLog ? 'linear' : 'log', 'yaxis2.type': isLog ? 'linear' : 'log' });
+        }
+      }]
+    };
+    // Pass the element directly (not the id string) so `extendTraces`
+    // later references the same node, even if a sibling IIFE
+    // replaces `#loss-chart` between now and the next SSE message.
+    Plotly.newPlot(el, traces, layout, config);
+    plotEl = el;
+  }
+
+  if (el && typeof Plotly !== 'undefined') initPlot();
+
+  var es = new EventSource('/train/{{ run_id }}/sse');
+  window.__trainES__ = es;
+
+  // For M10 ensemble runs we want the chart to show ALL members' epoch
+  // curves stacked on the same x-axis without any single curve
+  // overwriting another.  We solve this by tracking the current member
+  // and projecting its epoch onto a global x-axis offset
+  // (`x = (member-1)*max_epochs + epoch`) so member 2's epoch 1 lands
+  // at x = max_epochs+1 instead of x = 1 (which would overlap member 1).
+  // For single-model runs `member` arrives `null` and the offset stays 0.
+  var currentMember = 0;          // 1-based; 0 = single-model
+  var currentEnsembleSize = 0;
+  var memberMaxEpochs = 0;        // captured from first epoch event of each member
+
+  es.addEventListener('epoch', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+
+      // M10 member context — tag each epoch's x-coordinate so a 3-
+      // member ensemble lays out as three concatenated curves on the
+      // same chart (visually obvious that ensemble training is
+      // happening, no curves overwrite each other).
+      if (d.member && d.ensemble_size) {
+        if (d.member !== currentMember) {
+          currentMember = d.member;
+          currentEnsembleSize = d.ensemble_size;
+          memberMaxEpochs = d.max_epochs;
+          var lbl = document.getElementById('epoch-label');
+          if (lbl) lbl.textContent = 'Epoch (member ' + d.member + '/' + d.ensemble_size + ')';
+        }
+      }
+      var xOffset = currentMember > 0 ? (currentMember - 1) * memberMaxEpochs : 0;
+      var x = xOffset + d.epoch;
+
+      epochsArr.push(x);
+      trainArr.push(d.train_loss > 0 ? d.train_loss : null);
+      valArr.push(d.val_loss !== null && d.val_loss > 0 ? d.val_loss : null);
+      lrArr.push(d.learning_rate > 0 ? d.learning_rate : null);
+
+      // Only extend if:
+      //   1. we still own the current `#loss-chart` (no later swap),
+      //   2. Plotly has actually finished initialising it
+      //      (`_fullLayout` is populated only after `newPlot`).
+      if (plotEl && plotEl._fullLayout &&
+          document.getElementById('loss-chart') === plotEl) {
+        var idx = epochsArr.length - 1;
+        Plotly.extendTraces(plotEl, {
+          x: [[x], [x], [x]],
+          y: [[trainArr[idx]], [valArr[idx]], [lrArr[idx]]]
+        }, [0, 1, 2]);
+      }
+
+      // Progress bar — span the entire ensemble for M10 runs so it
+      // reaches 100% when ALL members finish, not 100% per member.
+      var totalEpochs = currentEnsembleSize > 0
+        ? currentEnsembleSize * memberMaxEpochs
+        : d.max_epochs;
+      var pct = Math.min(100, (x / totalEpochs * 100)).toFixed(0);
+      var fill = document.getElementById('progress-fill');
+      if (fill) fill.style.width = pct + '%';
+
+      var ed = document.getElementById('epoch-display');
+      if (ed) {
+        ed.textContent = currentMember > 0
+          ? d.epoch + '/' + d.max_epochs
+          : d.epoch + '/' + d.max_epochs;
+      }
+      var tl = document.getElementById('train-loss-display');
+      if (tl) tl.textContent = d.train_loss.toFixed(6);
+      var vl = document.getElementById('val-loss-display');
+      if (vl) vl.textContent = d.val_loss !== null ? d.val_loss.toFixed(6) : '-';
+      var lr = document.getElementById('lr-display');
+      if (lr) lr.textContent = d.learning_rate.toExponential(2);
+    } catch(err) {
+      console.error('SSE parse error:', err);
+    }
+  });
+
+  // stack stage events — short text milestones between members and
+  // around the post-training NRW refinement phase.  Without this the
+  // user sees ~5-30 seconds of frozen graph during stages 3 and 4 and
+  // assumes training crashed.
+  es.addEventListener('stage', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      var banner = document.getElementById('stage-banner');
+      var text = document.getElementById('stage-text');
+      if (banner) banner.style.display = 'block';
+      if (text) text.textContent = d.message || '';
+    } catch(err) {
+      console.error('SSE stage parse error:', err);
+    }
+  });
+
+  es.addEventListener('complete', function(e) {
+    es.close();
+    document.getElementById('progress-fill').style.width = '100%';
+    document.getElementById('train-status').innerHTML =
+      '<div class="card" style="border-color:#16a34a;background:#f0fdf4;"><p class="success" style="font-weight:600;">Training complete!</p><p style="margin-top:0.5rem;"><a href="/">View results on dashboard</a> | <a href="/evaluate">Evaluate model</a></p></div>';
+  });
+
+  es.addEventListener('training_error', function(e) {
+    es.close();
+    try {
+      var d = JSON.parse(e.data);
+      showError(d.message || 'Unknown training error');
+    } catch(err) {
+      showError(e.data || 'Training failed');
+    }
+  });
+
+  es.addEventListener('error', function(e) {
+    if (e.data) {
+      es.close();
+      try {
+        var d = JSON.parse(e.data);
+        showError(d.message || 'Unknown error');
+      } catch(err) {
+        showError(e.data);
+      }
+      return;
+    }
+    if (es.readyState === EventSource.CLOSED) {
+      es.close();
+      document.getElementById('train-status').innerHTML =
+        '<div class="card" style="border-color:#d97706;background:#fffbeb;"><p class="warning">Connection closed. <a href="/">Check dashboard</a> for results.</p></div>';
+    }
+  });
+
+  es.onerror = function() {
+    setTimeout(function() {
+      if (es.readyState !== EventSource.OPEN) {
+        es.close();
+      }
+    }, 3000);
+  };
+
+  function showError(msg) {
+    document.getElementById('train-status').innerHTML =
+      '<div class="card" style="border-color:#dc2626;background:#fef2f2;">' +
+      '<p class="error-msg" style="font-weight:600;">Training Failed</p>' +
+      '<p style="margin-top:0.25rem;font-size:0.875rem;font-family:monospace;white-space:pre-wrap;word-break:break-word;">' +
+      msg.replace(/</g, '&lt;').replace(/>/g, '&gt;') +
+      '</p><p style="margin-top:0.75rem;"><a href="/">Back to dashboard</a></p></div>';
+  }
+})();
+</script>

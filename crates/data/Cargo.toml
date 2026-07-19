@@ -1,0 +1,21 @@
+[package]
+name = "sparam-data"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+sparam-core = { workspace = true }
+sparam-models = { workspace = true }
+sparam-physics = { workspace = true }
+candle-core = { workspace = true }
+thiserror = { workspace = true }
+csv = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,1213 @@
+{% extends "base.html" %}
+{% block title %}Theory — Real MLP vs Complex MLP{% endblock %}
+{% block content %}
+<style>
+  /* Scoped styling for the theory page only. */
+  .theory h1 { font-size: 18px; margin-bottom: 0.35rem; }
+  .theory .lede { color: var(--text-secondary); font-size: 13px; margin-bottom: 1rem; max-width: 68ch; }
+
+  .arch-card { padding: 1rem 1rem 0.75rem; }
+  .arch-card h2 { font-size: 14px; letter-spacing: 0.04em; margin-bottom: 0.6rem; }
+  .arch-card .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-right: 0.5rem; vertical-align: 2px; }
+  .pill.real    { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; }
+  .pill.complex { background: #ede9fe; color: #6d28d9; border: 1px solid #c4b5fd; }
+
+  .arch-diagram { background: #fafafa; border: 1px solid var(--border); border-radius: 2px; padding: 0.5rem; margin: 0.5rem 0 0.75rem; overflow-x: auto; }
+  .arch-diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+
+  .math { font-family: var(--font-mono); background: #fafafa; border-left: 3px solid var(--border-heavy); padding: 0.5rem 0.75rem; margin: 0.5rem 0; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
+  .math.real    { border-left-color: #2563eb; }
+  .math.complex { border-left-color: #7c3aed; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+  .theory ul { margin: 0.3rem 0 0.3rem 1.1rem; font-size: 12px; }
+  .theory li { margin: 0.15rem 0; }
+  .theory p { font-size: 12.5px; color: var(--text); max-width: 68ch; margin: 0.4rem 0; }
+  .small-note { font-size: 11px; color: var(--text-muted); }
+
+  /* Compare table */
+  .compare { margin-top: 0.5rem; }
+  .compare th, .compare td { font-size: 12px; }
+  .compare td.tag-real    { color: #1d4ed8; font-weight: 600; }
+  .compare td.tag-complex { color: #6d28d9; font-weight: 600; }
+
+  /* SVG shared visual language */
+  .legend { display: flex; gap: 1rem; align-items: center; font-size: 11px; color: var(--text-secondary); margin-bottom: 0.25rem; }
+  .legend .sw { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; margin-right: 4px; border-radius: 50%; }
+</style>
+
+<div class="theory">
+  <h1>Theory — Real MLP vs Complex-Valued MLP</h1>
+  <p class="lede">
+    This project learns the inverse map from waveguide scattering parameters
+    <em>S</em><sub>11</sub>, <em>S</em><sub>21</sub> to the complex permittivity
+    ε = ε′ − jε″. Two architectures are benchmarked: a standard Real MLP that
+    treats the four real scalars independently, and a Complex-Valued MLP (CVNN)
+    that carries the native complex structure of <em>S</em>-parameters through
+    the whole forward pass.
+  </p>
+
+  <!-- Anchor menu so a long page is navigable. -->
+  <div class="card" style="padding:0.5rem 0.85rem; font-size:11.5px; background:#f8fafc;">
+    <strong style="color:#475569; letter-spacing:0.04em; font-size:10.5px;">CONTENTS:</strong>&nbsp;
+    <a href="#sec-problem">problem</a> ·
+    <a href="#sec-real">real MLP</a> ·
+    <a href="#sec-complex">complex MLP</a> ·
+    <a href="#sec-compare">side-by-side</a> ·
+    <a href="#sec-stack">stage stack</a> ·
+    <a href="#sec-shipped">shipped recipe</a> ·
+    <a href="#sec-loss">loss functions</a> ·
+    <a href="#sec-data">data pipeline</a> ·
+    <a href="#sec-train">training loop</a> ·
+    <a href="#sec-opt">optimisers</a> ·
+    <a href="#sec-hpo">HPO &amp; fANOVA</a> ·
+    <a href="#sec-metrics">metrics</a> ·
+    <a href="#sec-repro">reproducibility</a>
+  </div>
+
+  <!-- ═══════════════════ PROBLEM STATEMENT ═══════════════════ -->
+  <div class="card arch-card" id="sec-problem">
+    <h2>The problem — and why we replace NRW</h2>
+
+    <p>
+      A sample of the Material Under Test (<strong>MUT</strong>) of thickness
+      <em>d</em> is placed inside a rectangular waveguide of width <em>a</em>
+      and excited at frequency <em>f</em>. A Vector Network Analyser records
+      the complex reflection and transmission coefficients
+      <em>S</em><sub>11</sub> (reflected wave at port 1) and
+      <em>S</em><sub>21</sub> (wave transmitted to port 2). The inversion task
+      is: recover the complex permittivity ε = ε′ − jε″ of the MUT from the
+      measured (<em>S</em><sub>11</sub>, <em>S</em><sub>21</sub>).
+    </p>
+
+    <!-- ───── Physical setup ───── -->
+    <div class="arch-diagram">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260"
+           role="img" aria-labelledby="phys-title phys-desc">
+        <title id="phys-title">Waveguide with MUT and measured S-parameters</title>
+        <desc id="phys-desc">
+          Rectangular waveguide shown as a horizontal tube. A dielectric slab
+          of thickness d labelled MUT sits in the middle. An incident wave
+          enters from the left; a reflected wave measured as S11 returns to
+          port 1; a transmitted wave measured as S21 exits toward port 2.
+        </desc>
+
+        <!-- Waveguide top / bottom walls -->
+        <line x1="40"  y1="70"  x2="720" y2="70"  stroke="#334155" stroke-width="3"/>
+        <line x1="40"  y1="180" x2="720" y2="180" stroke="#334155" stroke-width="3"/>
+        <!-- End caps (open ports) -->
+        <line x1="40"  y1="70"  x2="40"  y2="80"  stroke="#334155" stroke-width="3"/>
+        <line x1="40"  y1="170" x2="40"  y2="180" stroke="#334155" stroke-width="3"/>
+        <line x1="720" y1="70"  x2="720" y2="80"  stroke="#334155" stroke-width="3"/>
+        <line x1="720" y1="170" x2="720" y2="180" stroke="#334155" stroke-width="3"/>
+
+        <!-- Waveguide width label (a) -->
+        <line x1="20"  y1="70"  x2="20"  y2="180" stroke="#94a3b8" stroke-width="1" marker-start="url(#arrow-small)" marker-end="url(#arrow-small)"/>
+        <text x="10" y="130" text-anchor="middle" font-size="12" fill="#475569"
+              font-family="var(--font-mono)" transform="rotate(-90 10 130)">a</text>
+
+        <!-- MUT slab -->
+        <rect x="340" y="70" width="80" height="110"
+              fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
+        <!-- MUT hatching to make it visually distinct -->
+        <defs>
+          <pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="6" stroke="#b45309" stroke-width="1" opacity="0.35"/>
+          </pattern>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="arrow-small" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+          </marker>
+        </defs>
+        <rect x="340" y="70" width="80" height="110" fill="url(#hatch)" stroke="none"/>
+        <text x="380" y="120" text-anchor="middle" font-size="13" font-weight="700" fill="#92400e">MUT</text>
+        <text x="380" y="138" text-anchor="middle" font-size="11" fill="#92400e">ε = ε′ − j·ε″</text>
+
+        <!-- Thickness label (d) -->
+        <line x1="340" y1="200" x2="420" y2="200" stroke="#94a3b8" stroke-width="1"
+              marker-start="url(#arrow-small)" marker-end="url(#arrow-small)"/>
+        <text x="380" y="218" text-anchor="middle" font-size="12" fill="#475569"
+              font-family="var(--font-mono)">d</text>
+
+        <!-- Incident wave (top half, going right) -->
+        <g color="#15803d">
+          <path d="M 60 95 Q 90 85, 120 95 T 180 95 T 240 95 T 300 95"
+                fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="180" y="80" text-anchor="middle" font-size="11" fill="#15803d" font-weight="600">incident wave</text>
+          <text x="180" y="110" text-anchor="middle" font-size="10" fill="#166534" font-family="var(--font-mono)">E_inc · e^(−jβz)</text>
+        </g>
+
+        <!-- Reflected wave S11 (bottom half, going left) -->
+        <g color="#b91c1c">
+          <path d="M 300 155 Q 270 165, 240 155 T 180 155 T 120 155 T 60 155"
+                fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="180" y="145" text-anchor="middle" font-size="11" fill="#b91c1c" font-weight="600">reflected  →  S₁₁</text>
+        </g>
+
+        <!-- Transmitted wave S21 (right of MUT, going right) -->
+        <g color="#7c3aed">
+          <path d="M 460 125 Q 500 115, 540 125 T 620 125 T 700 125"
+                fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="580" y="112" text-anchor="middle" font-size="11" fill="#7c3aed" font-weight="600">transmitted  →  S₂₁</text>
+        </g>
+
+        <!-- Port labels -->
+        <text x="40"  y="242" text-anchor="middle" font-size="11" fill="#475569" font-weight="600">port 1</text>
+        <text x="40"  y="58"  text-anchor="middle" font-size="10" fill="#64748b" font-family="var(--font-mono)">f</text>
+        <text x="720" y="242" text-anchor="middle" font-size="11" fill="#475569" font-weight="600">port 2</text>
+      </svg>
+    </div>
+
+    <!-- ───── Classical NRW vs NN replacement ───── -->
+    <p style="margin-top:0.75rem">
+      The <strong>Nicolson–Ross–Weir (NRW)</strong> algorithm solves this
+      analytically: it derives a reflection coefficient Γ and a transmission
+      factor T from (<em>S</em><sub>11</sub>, <em>S</em><sub>21</sub>), picks
+      the physically meaningful root of a complex logarithm, and algebraically
+      inverts to ε. It is closed-form but brittle:
+      <strong>multiple branches</strong> of the logarithm must be selected by
+      hand, and at half-wavelength-multiple thicknesses the matrix is
+      ill-conditioned. This project replaces that pipeline with a neural
+      network that maps <strong>(S₁₁, S₂₁) → (ε′, ε″)</strong> in one shot.
+    </p>
+
+    <div class="arch-diagram">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280"
+           role="img" aria-labelledby="nrw-vs-nn-title nrw-vs-nn-desc">
+        <title id="nrw-vs-nn-title">Classical NRW vs trained neural network</title>
+        <desc id="nrw-vs-nn-desc">
+          Two parallel pipelines that both take measured S11 and S21 and
+          produce ε. The top pipeline is NRW: a chain of steps (reflection
+          coefficient, transmission factor, branch selection, algebraic
+          inversion) with a warning sign at the branch-selection step.
+          The bottom pipeline is a single neural-network box labelled MLP or
+          CVNN that outputs ε directly.
+        </desc>
+
+        <!-- Shared input node -->
+        <g>
+          <rect x="30" y="115" width="110" height="60" rx="6"
+                fill="#f1f5f9" stroke="#334155" stroke-width="2"/>
+          <text x="85" y="138" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">measured</text>
+          <text x="85" y="156" text-anchor="middle" font-size="12" font-family="var(--font-mono)" fill="#0f172a">(S₁₁, S₂₁)</text>
+        </g>
+
+        <!-- ─── Top row: NRW pipeline ─── -->
+        <g color="#b45309">
+          <text x="195" y="34" font-size="11" font-weight="700" fill="#92400e">CLASSICAL NRW</text>
+
+          <!-- Box 1: Γ -->
+          <rect x="195" y="40" width="90" height="44" rx="4"
+                fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+          <text x="240" y="58" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">Γ</text>
+          <text x="240" y="74" text-anchor="middle" font-size="9"  fill="#92400e" font-family="var(--font-mono)">refl. coeff</text>
+
+          <!-- arrow -->
+          <line x1="285" y1="62" x2="315" y2="62" stroke="#b45309" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+
+          <!-- Box 2: T -->
+          <rect x="315" y="40" width="90" height="44" rx="4"
+                fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+          <text x="360" y="58" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">T</text>
+          <text x="360" y="74" text-anchor="middle" font-size="9"  fill="#92400e" font-family="var(--font-mono)">trans. factor</text>
+
+          <line x1="405" y1="62" x2="435" y2="62" stroke="#b45309" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+
+          <!-- Box 3: branch selection (warning) -->
+          <rect x="435" y="40" width="140" height="44" rx="4"
+                fill="#fee2e2" stroke="#b91c1c" stroke-width="1.5"/>
+          <text x="505" y="56" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">⚠ pick log branch</text>
+          <text x="505" y="72" text-anchor="middle" font-size="9"  fill="#991b1b" font-family="var(--font-mono)">(ambiguous)</text>
+
+          <line x1="575" y1="62" x2="605" y2="62" stroke="#b45309" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+
+          <!-- Box 4: ε output -->
+          <rect x="605" y="40" width="90" height="44" rx="4"
+                fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+          <text x="650" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#166534">ε′ − j·ε″</text>
+          <text x="650" y="74" text-anchor="middle" font-size="9"  fill="#166534" font-family="var(--font-mono)">result</text>
+        </g>
+
+        <!-- connector from input to NRW first box -->
+        <line x1="140" y1="145" x2="195" y2="62" stroke="#b45309" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+
+        <!-- ─── Bottom row: NN pipeline ─── -->
+        <g color="#1d4ed8">
+          <text x="195" y="214" font-size="11" font-weight="700" fill="#1d4ed8">THIS PROJECT — NEURAL NETWORK</text>
+
+          <!-- Single model box -->
+          <rect x="195" y="220" width="380" height="44" rx="4"
+                fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+          <text x="385" y="238" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">
+            MLP  ∥  Complex MLP (CVNN)
+          </text>
+          <text x="385" y="254" text-anchor="middle" font-size="9" fill="#1d4ed8" font-family="var(--font-mono)">
+            trained on simulated (S₁₁, S₂₁, ε) grids via NRW forward model
+          </text>
+
+          <line x1="575" y1="242" x2="605" y2="242" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+          <rect x="605" y="220" width="90" height="44" rx="4"
+                fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+          <text x="650" y="238" text-anchor="middle" font-size="11" font-weight="700" fill="#166534">ε′ − j·ε″</text>
+          <text x="650" y="254" text-anchor="middle" font-size="9"  fill="#166534" font-family="var(--font-mono)">one pass</text>
+        </g>
+
+        <!-- connector from input to NN box -->
+        <line x1="140" y1="145" x2="195" y2="242" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+        <!-- Colored arrow markers -->
+        <defs>
+          <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+          </marker>
+          <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/>
+          </marker>
+        </defs>
+      </svg>
+    </div>
+
+    <ul>
+      <li><strong>NRW strengths:</strong> closed-form, no training, fast
+        single-shot evaluation.</li>
+      <li><strong>NRW weaknesses:</strong> branch ambiguity of the complex log,
+        ill-conditioning near <em>d</em> ≈ <em>k</em>·λ<sub>g</sub>/2,
+        noise amplification for low-loss materials.</li>
+      <li><strong>NN replacement:</strong> a single feed-forward pass, no branch
+        selection, smooth behaviour across the whole (ε′, ε″) grid. The
+        training data is generated by running the <em>forward</em> NRW model
+        on a sweep of permittivities — so the network learns the inverse map
+        without any hand-picked branch rules.</li>
+    </ul>
+  </div>
+
+  <!-- ═══════════════════ REAL MLP ═══════════════════ -->
+  <div class="card arch-card" id="sec-real">
+    <h2><span class="pill real">Real</span> Real-Valued MLP&nbsp;&nbsp;
+      <span class="small-note">ℝ<sup>4</sup> → ℝ<sup>H</sup> → ℝ<sup>2</sup></span>
+    </h2>
+
+    <p>
+      A plain feed-forward regressor. The four real components of the
+      S-parameters are stacked into a single real vector of length 4, passed
+      through one hidden layer of <em>H</em> neurons with a pointwise
+      non-linearity σ, and projected to 2 real outputs interpreted as
+      (ε′, ε″).
+    </p>
+
+    <div class="legend">
+      <span><span class="sw" style="background:#2563eb"></span>real neuron (scalar activation)</span>
+      <span><span style="display:inline-block;width:22px;border-top:2px solid #2563eb;vertical-align:middle;margin-right:4px"></span>real weight (single scalar)</span>
+    </div>
+
+    <div class="arch-diagram">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320"
+           role="img" aria-labelledby="real-title real-desc">
+        <title id="real-title">Real MLP: 4 real inputs, H=6 real hidden units, 2 real outputs</title>
+        <desc id="real-desc">
+          Feed-forward network with a single hidden layer. Every edge carries
+          one real scalar; every node applies a real activation.
+        </desc>
+
+        <!-- Column headers -->
+        <text x="110" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#1d4ed8">INPUT (ℝ⁴)</text>
+        <text x="380" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#1d4ed8">HIDDEN (ℝ^H)</text>
+        <text x="650" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#1d4ed8">OUTPUT (ℝ²)</text>
+
+        <!-- Edges input → hidden -->
+        <g stroke="#2563eb" stroke-width="1" stroke-opacity="0.45" fill="none">
+          <!-- 4 inputs × 6 hidden = 24 lines -->
+          <!-- Inputs at x=110, y=70,130,190,250 ; Hidden at x=380, y=60,110,160,210,260,295 -->
+          <line x1="140" y1="70"  x2="355" y2="60"/>
+          <line x1="140" y1="70"  x2="355" y2="110"/>
+          <line x1="140" y1="70"  x2="355" y2="160"/>
+          <line x1="140" y1="70"  x2="355" y2="210"/>
+          <line x1="140" y1="70"  x2="355" y2="260"/>
+          <line x1="140" y1="70"  x2="355" y2="295"/>
+          <line x1="140" y1="130" x2="355" y2="60"/>
+          <line x1="140" y1="130" x2="355" y2="110"/>
+          <line x1="140" y1="130" x2="355" y2="160"/>
+          <line x1="140" y1="130" x2="355" y2="210"/>
+          <line x1="140" y1="130" x2="355" y2="260"/>
+          <line x1="140" y1="130" x2="355" y2="295"/>
+          <line x1="140" y1="190" x2="355" y2="60"/>
+          <line x1="140" y1="190" x2="355" y2="110"/>
+          <line x1="140" y1="190" x2="355" y2="160"/>
+          <line x1="140" y1="190" x2="355" y2="210"/>
+          <line x1="140" y1="190" x2="355" y2="260"/>
+          <line x1="140" y1="190" x2="355" y2="295"/>
+          <line x1="140" y1="250" x2="355" y2="60"/>
+          <line x1="140" y1="250" x2="355" y2="110"/>
+          <line x1="140" y1="250" x2="355" y2="160"/>
+          <line x1="140" y1="250" x2="355" y2="210"/>
+          <line x1="140" y1="250" x2="355" y2="260"/>
+          <line x1="140" y1="250" x2="355" y2="295"/>
+        </g>
+
+        <!-- Edges hidden → output -->
+        <g stroke="#2563eb" stroke-width="1" stroke-opacity="0.55" fill="none">
+          <line x1="405" y1="60"  x2="620" y2="140"/>
+          <line x1="405" y1="60"  x2="620" y2="210"/>
+          <line x1="405" y1="110" x2="620" y2="140"/>
+          <line x1="405" y1="110" x2="620" y2="210"/>
+          <line x1="405" y1="160" x2="620" y2="140"/>
+          <line x1="405" y1="160" x2="620" y2="210"/>
+          <line x1="405" y1="210" x2="620" y2="140"/>
+          <line x1="405" y1="210" x2="620" y2="210"/>
+          <line x1="405" y1="260" x2="620" y2="140"/>
+          <line x1="405" y1="260" x2="620" y2="210"/>
+          <line x1="405" y1="295" x2="620" y2="140"/>
+          <line x1="405" y1="295" x2="620" y2="210"/>
+        </g>
+
+        <!-- Input nodes -->
+        <g>
+          <circle cx="110" cy="70"  r="22" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="110" y="74" text-anchor="middle" font-size="11" fill="#1d4ed8">S₁₁·ᵣ</text>
+
+          <circle cx="110" cy="130" r="22" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="110" y="134" text-anchor="middle" font-size="11" fill="#1d4ed8">S₁₁·ᵢ</text>
+
+          <circle cx="110" cy="190" r="22" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="110" y="194" text-anchor="middle" font-size="11" fill="#1d4ed8">S₂₁·ᵣ</text>
+
+          <circle cx="110" cy="250" r="22" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="110" y="254" text-anchor="middle" font-size="11" fill="#1d4ed8">S₂₁·ᵢ</text>
+        </g>
+
+        <!-- Hidden nodes -->
+        <g>
+          <circle cx="380" cy="60"  r="20" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="380" y="64" text-anchor="middle" font-size="11" fill="#1d4ed8">σ</text>
+          <circle cx="380" cy="110" r="20" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="380" y="114" text-anchor="middle" font-size="11" fill="#1d4ed8">σ</text>
+          <circle cx="380" cy="160" r="20" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="380" y="164" text-anchor="middle" font-size="11" fill="#1d4ed8">σ</text>
+          <circle cx="380" cy="210" r="20" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="380" y="214" text-anchor="middle" font-size="11" fill="#1d4ed8">σ</text>
+          <circle cx="380" cy="260" r="20" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="380" y="264" text-anchor="middle" font-size="11" fill="#1d4ed8">σ</text>
+          <circle cx="380" cy="295" r="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="380" y="299" text-anchor="middle" font-size="10" fill="#1d4ed8">⋯</text>
+        </g>
+
+        <!-- Output nodes -->
+        <g>
+          <circle cx="650" cy="140" r="24" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="650" y="144" text-anchor="middle" font-size="12" fill="#1d4ed8">ε′</text>
+
+          <circle cx="650" cy="210" r="24" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+          <text x="650" y="214" text-anchor="middle" font-size="12" fill="#1d4ed8">ε″</text>
+        </g>
+
+        <!-- Labels under layers -->
+        <text x="380" y="315" text-anchor="middle" font-size="10" fill="#64748b">H real neurons</text>
+      </svg>
+    </div>
+
+    <div class="math real">forward pass  (real, per sample x ∈ ℝ⁴):
+  h  = σ( N( W₁·x + b₁ ) )       W₁ ∈ ℝ^(H×4),  b₁ ∈ ℝ^H
+  y  =     W₂·h + b₂              W₂ ∈ ℝ^(2×H),  b₂ ∈ ℝ²
+
+parameter count:
+  base                 :  7H + 2
+  + LayerNorm/BatchNorm:  +2H  ⇒  9H + 2  (default with norm)</div>
+
+    <p>
+      Activations searchable by HPO: <code>relu</code>,
+      <code>tanh</code>, <code>gelu</code>, <code>leaky_relu</code>,
+      <code>elu</code> — all stateless. Regularisation: dropout
+      p ∈ [0, 0.4], input noise, optional LayerNorm / BatchNorm.
+      Simple and fast; ignores the algebraic pairing between
+      real and imaginary halves of each S-parameter.
+    </p>
+  </div>
+
+  <!-- ═══════════════════ COMPLEX MLP ═══════════════════ -->
+  <div class="card arch-card" id="sec-complex">
+    <h2><span class="pill complex">Complex</span> Complex-Valued MLP (CVNN)&nbsp;&nbsp;
+      <span class="small-note">ℂ² → ℂ^H → ℂ¹</span>
+    </h2>
+
+    <p>
+      Treats each S-parameter as a single complex number rather than two
+      unrelated reals. Weights, biases and activations are all complex-valued.
+      The input is a 2-vector of complexes [S₁₁, S₂₁], the hidden layer has
+      <em>H</em> complex neurons, and the output is a single complex number
+      reinterpreted as ε = ε′ − jε″.
+    </p>
+
+    <div class="legend">
+      <span><span class="sw" style="background:#ede9fe;border:2px solid #7c3aed;box-shadow:inset 0 0 0 2px #fff, inset 0 0 0 4px #7c3aed"></span>complex neuron (carries real + imag)</span>
+      <span>
+        <svg width="30" height="14" style="vertical-align:middle;margin-right:4px">
+          <line x1="0" y1="5"  x2="30" y2="5"  stroke="#7c3aed" stroke-width="1.5"/>
+          <line x1="0" y1="9"  x2="30" y2="9"  stroke="#7c3aed" stroke-width="1.5"/>
+        </svg>
+        complex weight (real + imag lane)
+      </span>
+    </div>
+
+    <div class="arch-diagram">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320"
+           role="img" aria-labelledby="cvnn-title cvnn-desc">
+        <title id="cvnn-title">Complex MLP: 2 complex inputs, H=4 complex hidden units, 1 complex output</title>
+        <desc id="cvnn-desc">
+          Complex-valued network. Nodes shown as double rings indicate each
+          neuron carries a real and an imaginary part. Edges are drawn as a
+          pair of parallel lines to emphasise that every weight is itself a
+          complex number (two real parameters).
+        </desc>
+
+        <!-- Column headers -->
+        <text x="110" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#6d28d9">INPUT (ℂ²)</text>
+        <text x="380" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#6d28d9">HIDDEN (ℂ^H)</text>
+        <text x="650" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#6d28d9">OUTPUT (ℂ¹)</text>
+
+        <!-- Edges input → hidden (each edge = 2 parallel lines = complex weight) -->
+        <g stroke="#7c3aed" stroke-width="1" stroke-opacity="0.45" fill="none">
+          <!-- input at x=110 y=110,210 ; hidden at x=380 y=70,140,210,280 -->
+          <!-- input S11 → 4 hidden (2 lines each, offset by 3px) -->
+          <line x1="140" y1="108" x2="355" y2="68"/>
+          <line x1="140" y1="112" x2="355" y2="72"/>
+          <line x1="140" y1="108" x2="355" y2="138"/>
+          <line x1="140" y1="112" x2="355" y2="142"/>
+          <line x1="140" y1="108" x2="355" y2="208"/>
+          <line x1="140" y1="112" x2="355" y2="212"/>
+          <line x1="140" y1="108" x2="355" y2="278"/>
+          <line x1="140" y1="112" x2="355" y2="282"/>
+
+          <line x1="140" y1="208" x2="355" y2="68"/>
+          <line x1="140" y1="212" x2="355" y2="72"/>
+          <line x1="140" y1="208" x2="355" y2="138"/>
+          <line x1="140" y1="212" x2="355" y2="142"/>
+          <line x1="140" y1="208" x2="355" y2="208"/>
+          <line x1="140" y1="212" x2="355" y2="212"/>
+          <line x1="140" y1="208" x2="355" y2="278"/>
+          <line x1="140" y1="212" x2="355" y2="282"/>
+        </g>
+
+        <!-- Edges hidden → output -->
+        <g stroke="#7c3aed" stroke-width="1" stroke-opacity="0.55" fill="none">
+          <line x1="405" y1="68"  x2="620" y2="158"/>
+          <line x1="405" y1="72"  x2="620" y2="162"/>
+          <line x1="405" y1="138" x2="620" y2="158"/>
+          <line x1="405" y1="142" x2="620" y2="162"/>
+          <line x1="405" y1="208" x2="620" y2="158"/>
+          <line x1="405" y1="212" x2="620" y2="162"/>
+          <line x1="405" y1="278" x2="620" y2="158"/>
+          <line x1="405" y1="282" x2="620" y2="162"/>
+        </g>
+
+        <!-- Complex input nodes: double rings -->
+        <g>
+          <circle cx="110" cy="110" r="26" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="110" cy="110" r="20" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="110" y="107" text-anchor="middle" font-size="11" fill="#6d28d9" font-weight="600">S₁₁</text>
+          <text x="110" y="122" text-anchor="middle" font-size="9"  fill="#6d28d9">= r + j·i</text>
+
+          <circle cx="110" cy="210" r="26" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="110" cy="210" r="20" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="110" y="207" text-anchor="middle" font-size="11" fill="#6d28d9" font-weight="600">S₂₁</text>
+          <text x="110" y="222" text-anchor="middle" font-size="9"  fill="#6d28d9">= r + j·i</text>
+        </g>
+
+        <!-- Complex hidden nodes -->
+        <g>
+          <circle cx="380" cy="70"  r="22" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="380" cy="70"  r="16" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="380" y="74" text-anchor="middle" font-size="11" fill="#6d28d9">σ_ℂ</text>
+
+          <circle cx="380" cy="140" r="22" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="380" cy="140" r="16" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="380" y="144" text-anchor="middle" font-size="11" fill="#6d28d9">σ_ℂ</text>
+
+          <circle cx="380" cy="210" r="22" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="380" cy="210" r="16" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="380" y="214" text-anchor="middle" font-size="11" fill="#6d28d9">σ_ℂ</text>
+
+          <circle cx="380" cy="280" r="22" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="380" cy="280" r="16" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="380" y="284" text-anchor="middle" font-size="11" fill="#6d28d9">σ_ℂ</text>
+        </g>
+
+        <!-- Complex output node -->
+        <g>
+          <circle cx="650" cy="160" r="28" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+          <circle cx="650" cy="160" r="22" fill="none"    stroke="#7c3aed" stroke-width="2"/>
+          <text x="650" y="158" text-anchor="middle" font-size="12" fill="#6d28d9" font-weight="600">ε</text>
+          <text x="650" y="172" text-anchor="middle" font-size="9"  fill="#6d28d9">= ε′ − j·ε″</text>
+        </g>
+
+        <text x="380" y="310" text-anchor="middle" font-size="10" fill="#6d28d9">H complex neurons · each = (real, imag)</text>
+      </svg>
+    </div>
+
+    <div class="math complex">forward pass  (complex, per sample z ∈ ℂ², train mode):
+  h₁ = W₁ · z + b₁              W₁ ∈ ℂ^(H×2),  b₁ ∈ ℂ^H
+  h₂ = ComplexLayerNorm(h₁)     per-half LN: γᵣ, βᵣ on Re; γᵢ, βᵢ on Im
+  h₃ = σ_ℂ(h₂)                  complex activation
+  h₄ = ComplexDropout(h₃, p)    pair-wise — drops whole (r, i) pairs
+  ε̂_raw = W₂ · h₄ + b₂            W₂ ∈ ℂ^(1×H),  b₂ ∈ ℂ
+  ε̂ = SoftplusClamp(ε̂_raw)        always-on physical constraint:
+                                  ε̂′ = 1 + softplus(rawᵣ)   ⇒ ε̂′ ≥ 1
+                                  Im(ε̂) = −softplus(−rawᵢ)   ⇒ Im(ε̂) ≤ 0
+
+each complex multiply expands into 4 real multiplies:
+  (a + j·b) · (x + j·y)  =  (a·x − b·y)  +  j·(a·y + b·x)
+
+parameter count in real numbers (each complex = 2 reals):
+  2·(2H + H)  +  2·(H + 1)  +  4H            =  8H + 2  +  4H  =  12H + 2
+  └── ComplexLinear + biases ──┘  ┕━ LN γ/β (per-half) ━┙
+
+regularization:
+  ComplexLayerNorm  (always on)  : 4H   (γᵣ, βᵣ, γᵢ, βᵢ — H scalars each)
+  ComplexDropout(p)              : 0    (pair-wise mask, no learnables)
+  gradient clipping (trainer)    : 0    (optimizer-agnostic step)
+  input noise (σ std)            : 0    (added to packed [Re, Im])
+  weight decay (optimizer)       : 0    (AdamW / SGD / RMSprop L2)
+
+extra learnable parameters per activation choice (real scalars):
+  +  CGELU / Cardioid             :  0      (stateless)
+  +  HybridCardioidGelu           :  1      (one λ mix scalar — default)
+
+examples at H = 48:
+  base (cgelu / cardioid)         →   578   (matches Real h=64 + LayerNorm)
+  base + hybrid_cardioid_gelu     →   579   (one extra mix scalar)</div>
+
+    <p>
+      <strong>Complex activations σ<sub>ℂ</sub></strong> — eight
+      variants, all searchable by HPO. Phase-preserving forms
+      (cardioid, cgelu, hybrid_cardioid_gelu, worelu) dominate the
+      Pareto front; the rest stay in the menu in case the
+      preferred ranking shifts as the dataset / loss change.
+    </p>
+    <div class="math complex">crelu                z ↦ ReLU(Re z) + j·ReLU(Im z)         stateless
+cgelu                z ↦ z · Φ(|z|)                       stateless
+cardioid             z ↦ z · ½(1 + cos arg z)             stateless
+modrelu              z ↦ ReLU(|z|+b) · z/|z|              H scalars (b)
+hybrid_cardioid_gelu z ↦ z · [λ·½(1+cos arg z) + (1−λ)·Φ(|z|)]  1 scalar
+lpma                 z ↦ z · exp(j·b_p·tanh(|z|)) · σ(|z|+b_m)  2H scalars
+cswish_phase         z ↦ z · σ(|z|) · exp(j·α·sin(2 arg z))     1 scalar
+worelu               z ↦ z · σ(k(|z|−b)) · σ(k(θ−|arg z|))      3 scalars (shipped default)</div>
+
+    <h3 style="margin-top:1rem;">Always-on architectural pieces</h3>
+    <p>
+      <strong>Per-half LayerNorm</strong> between ComplexLinear and
+      the activation (independent γ, β on Re and Im — 4·H scalars).
+      <strong>Softplus output clamp</strong> at every forward pass
+      (training + inference) pins ε̂′ ≥ 1 and Im(ε̂) ≤ 0 in the
+      physical regime. <strong>Stable-sqrt</strong> NRW path
+      bounds the backward gradient at the vacuum boundary ε ≈ 1+0j
+      where the principal sqrt has a 1/√0 pole; always on for the
+      physics-forward loss.
+    </p>
+    <p class="small-note">
+      At inference the 4 real measurements
+      (S₁₁.r, S₁₁.i, S₂₁.r, S₂₁.i) are repacked into a 2-vector of
+      complexes before the forward pass; the network never sees
+      them as independent reals.
+    </p>
+  </div>
+
+  <!-- ═══════════════════ COMPARISON ═══════════════════ -->
+  <div class="card arch-card" id="sec-compare">
+    <h2>Side-by-side</h2>
+    <table class="compare">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Real MLP</th>
+          <th>Complex MLP (CVNN)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Input / output shape</td>
+          <td class="tag-real">ℝ⁴ → ℝ²</td>
+          <td class="tag-complex">ℂ² → ℂ¹</td>
+        </tr>
+        <tr>
+          <td>Hidden width sampled by HPO</td>
+          <td class="tag-real">{8, 16, 32, 64}</td>
+          <td class="tag-complex">{6, 12, 24, 48}</td>
+        </tr>
+        <tr>
+          <td>Base parameter count (real scalars)</td>
+          <td class="tag-real">7H + 2</td>
+          <td class="tag-complex">8H + 2&nbsp;&nbsp;<span class="small-note">(H complex units = 2H real activations)</span></td>
+        </tr>
+        <tr>
+          <td>Extra params from normalization</td>
+          <td class="tag-real">+ 2H&nbsp;&nbsp;<span class="small-note">(BatchNorm / LayerNorm / FusedLayerNorm; γ, β — searchable)</span></td>
+          <td class="tag-complex">+ 4H&nbsp;&nbsp;<span class="small-note">(per-half LayerNorm — γᵣ, βᵣ, γᵢ, βᵢ — <em>always on</em>)</span></td>
+        </tr>
+        <tr>
+          <td>Extra params from activation</td>
+          <td class="tag-real">0&nbsp;&nbsp;(all real activations are stateless)</td>
+          <td class="tag-complex">
+            0 (cgelu, cardioid, crelu) · +1 (hybrid_cardioid_gelu, cswish_phase)
+            · +3 (worelu, <em>shipped default</em>) · +H (modrelu) · +2H (lpma)
+          </td>
+        </tr>
+        <tr>
+          <td>Output clamp (always on, Complex)</td>
+          <td class="tag-real">— (Real predicts ε″ ≥ 0 directly; no architectural clamp)</td>
+          <td class="tag-complex">softplus: ε̂′ = 1 + softplus(rawᵣ), Im(ε̂) = −softplus(−rawᵢ)</td>
+        </tr>
+        <tr>
+          <td>NRW backward path (physics_forward)</td>
+          <td class="tag-real">— (loss not used)</td>
+          <td class="tag-complex">stable-sqrt at the vacuum boundary (always on)</td>
+        </tr>
+        <tr>
+          <td>Stateless elements (no parameter impact)</td>
+          <td class="tag-real">dropout, input noise, grad-clip</td>
+          <td class="tag-complex">dropout (pair-wise), input noise, grad-clip&nbsp;&nbsp;<span class="small-note">(same trainer codepath as Real)</span></td>
+        </tr>
+        <tr>
+          <td>Activation family (HPO menu)</td>
+          <td class="tag-real">relu / tanh / gelu / leaky_relu / elu&nbsp;&nbsp;<span class="small-note">(shipped default: <strong>relu</strong>)</span></td>
+          <td class="tag-complex">cardioid / cgelu / hybrid_cardioid_gelu / worelu / modrelu / lpma / cswish_phase / crelu&nbsp;&nbsp;<span class="small-note">(shipped default: <strong>worelu</strong>; all 8 are searchable)</span></td>
+        </tr>
+        <tr>
+          <td>HPO loss menu</td>
+          <td class="tag-real">mse / smooth_l1 / eps_rel_mse&nbsp;&nbsp;<span class="small-note">(shipped default: <strong>eps_rel_mse</strong>)</span></td>
+          <td class="tag-complex">mse / smooth_l1 / physics_forward&nbsp;&nbsp;<span class="small-note">(shipped default: <strong>eps_rel_mse</strong> on the menu; physics_forward stays available, λ ∈ log [1e-3, 1])</span></td>
+        </tr>
+        <tr>
+          <td>Median ensemble (shipped)</td>
+          <td class="tag-real">5-median across adjacent seeds (S, S+1, …, S+4)</td>
+          <td class="tag-complex">3-median across adjacent seeds (S, S+1, S+2)</td>
+        </tr>
+        <tr>
+          <td>Train-overlay-only data anchor</td>
+          <td class="tag-real">8×8 patch in [1, 2.5] × [0, 1.75]</td>
+          <td class="tag-complex">8×8 patch in [1, 2.5] × [0, 1.75]</td>
+        </tr>
+        <tr>
+          <td>Inference-time NRW refinement (Stage 5)</td>
+          <td class="tag-real">opt-in checkbox on /evaluate &amp; /infer</td>
+          <td class="tag-complex">opt-in checkbox on /evaluate &amp; /infer</td>
+        </tr>
+        <tr>
+          <td>Captures S-parameter pairing?</td>
+          <td class="tag-real">no — treats r, i as unrelated scalars</td>
+          <td class="tag-complex">yes — every multiply mixes r and i via the complex algebra</td>
+        </tr>
+        <tr>
+          <td>Typical sweet spot</td>
+          <td class="tag-real">very small H, cheap training budgets</td>
+          <td class="tag-complex">same-accuracy targets at smaller <em>effective</em> width when the signal is inherently complex</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="small-note" style="margin-top:0.6rem">
+      Both architectures are driven by the same HPO loop (NSGA-III on
+      three objectives — <em>OK@1 %</em>, <em>param count</em>,
+      <em>max error</em> — evaluated on the perturbed test grid).
+    </p>
+  </div>
+
+  <!-- ═══════════════════ STAGE STACK ═══════════════════ -->
+  <div class="card arch-card" id="sec-stack">
+    <h2>Stage stack — five interventions that close the worst-case tail</h2>
+
+    <p>
+      The HPO winner alone (single model, no overlay, no ensemble,
+      no refinement) leaves both pipelines with a long-tail problem:
+      worst-case relative error on a single test sample spikes to
+      ≈50 % (Complex) or ≈138 % (Real) on the
+      <code>hard</code> grid. Stacking five interventions on top of
+      the HPO recipe closes that tail to under 10 % on every one of
+      7 test seeds for both families. <strong>Stages 1–4 are
+      training-time only; Stage 5 is opt-in at inference.</strong>
+    </p>
+
+    <table class="compare">
+      <thead>
+        <tr>
+          <th>Stage</th>
+          <th>Intervention</th>
+          <th>What it solves</th>
+          <th>Worst max-err / OK@1</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>0</td>
+          <td>HPO recipe verbatim, single model</td>
+          <td>Baseline</td>
+          <td>≈50 % / ≈95 %</td>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td><strong>Train-overlay-only</strong> 8×8 patch in [1, 2.5] × [0, 1.75]</td>
+          <td>HPO sampled the singular corner sparsely. Adding 64 anchor points only at training time (eval grid stays standard) teaches the model the local geometry.</td>
+          <td>≈45 % / ≈94 %</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><strong>EpsRelMse</strong> loss override (replaces smooth_l1)</td>
+          <td>Variance crusher. Bulk samples (|ε| ≈ 30) dominate vanilla MSE and the singular corner (|ε| ≈ 1.5) vanishes in the gradient. Dividing by |ε| rebalances; the optimiser literally minimises the reported metric.</td>
+          <td>≈11 % / ≈88 %</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><strong>Activation override</strong>: <code>worelu</code> for Complex, <code>relu</code> for Real</td>
+          <td>HPO's activation pick was optimal on the easy home grid, not on hard. ReLU's hard-zero gradient breaks correlated worst-sample errors that LeakyReLU's smoother slope produced across ensemble members.</td>
+          <td>≈11 % / ≈83 % (bimodal — 2/7 seeds stuck)</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td><strong>Median ensemble</strong>: 3 (Complex) / 5 (Real) models on adjacent seeds, per-element median</td>
+          <td>Median (not mean) discards a single bad-seed prediction sample-by-sample. Real needs 5 because LeakyReLU/ReLU members otherwise miss the same singular-corner sample together.</td>
+          <td><strong>5.7 % / 91.3–95.8 %</strong> (training-only feasibility, 7/7)</td>
+        </tr>
+        <tr style="background:#fef3c7;">
+          <td>5</td>
+          <td><strong>NRW refinement</strong> (opt-in, at inference): 100 Adam steps on |NRW(ε̂) − S|², warm-started at the median prediction</td>
+          <td>Levenberg–Marquardt-style polish. The MLP picks the right basin; the physics solver finds the exact bottom. Per-sample optimisation pass — opt-in only.</td>
+          <td><strong>3.16 % (Complex) / 4.56 % (Real)</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="small-note" style="margin-top:0.6rem;">
+      Median, not mean. If two healthy seeds predict ε ≈ 40 and one
+      trapped seed predicts ε ≈ 25, mean = 35 (outside the 1 % band)
+      while median = 40 (inside). The median discards the outlier
+      sample-by-sample. Three is the smallest odd ensemble for Complex;
+      Real needs five because all LeakyReLU / ReLU members make
+      correlated errors on the same singular-corner sample, so a wider
+      ensemble is needed before the median can filter them out.
+    </p>
+
+    <p class="small-note">
+      Stage 5 is exposed in the program as an opt-in checkbox on
+      <a href="/evaluate">/evaluate</a> and
+      <a href="/infer">/infer</a> (default off). At deployment the
+      trained ensemble alone hits feasibility on both pipelines;
+      enabling Stage 5 tightens worst-case error by another ≈2× at
+      the cost of a per-sample optimisation pass.
+    </p>
+  </div>
+
+  <!-- ═══════════════════ SHIPPED RECIPE ═══════════════════ -->
+  <div class="card arch-card" id="sec-shipped"
+       style="border-left:4px solid #16a34a; background:#f0fdf4;">
+    <h2 style="color:#15803d;">Shipped winning recipe</h2>
+    <p>The configuration the program ships, per family:</p>
+    <table class="compare">
+      <thead>
+        <tr><th>Family</th><th>Architecture &amp; recipe</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="tag-complex">Complex H=48</td>
+          <td>
+            <code>worelu</code> activation,
+            per-half ComplexLN, AdamW, cosine,
+            <code>eps_rel_mse</code> loss, train-overlay <code>d=8</code>,
+            <strong>3-median ensemble</strong>.
+          </td>
+        </tr>
+        <tr>
+          <td class="tag-real">Real H=64</td>
+          <td>
+            <code>relu</code> activation,
+            LayerNorm, AdamW, cosine,
+            <code>eps_rel_mse</code> loss, train-overlay <code>d=8</code>,
+            <strong>5-median ensemble</strong>.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="margin-top:0.6rem;">
+      Both reach joint feasibility (max-err ≤ 10 % and OK@1 ≥ 90 %
+      on every one of 7 test seeds) at training time alone.
+      <strong>Stage 5 NRW refinement</strong> (100 Adam steps
+      minimising |NRW(ε̂) − S|² on the median prediction) is exposed
+      as an <em>opt-in checkbox</em> on
+      <a href="/evaluate">/evaluate</a> and
+      <a href="/infer">/infer</a>; enabling it tightens worst-case
+      error by another ≈2×.
+    </p>
+    <p class="small-note" style="margin-top:0.4rem;">
+      One-click preset for either family is available on
+      <a href="/train">/train</a> (<em>Stack presets</em> banner).
+    </p>
+  </div>
+
+  <!-- ═══════════════════ LOSS FUNCTIONS ═══════════════════ -->
+  <div class="card arch-card" id="sec-loss">
+    <h2>Loss functions</h2>
+
+    <p>
+      Every loss below receives a pair of tensors <em>ε̂</em>
+      (prediction) and <em>ε</em> (target). The real MLP outputs a
+      packed <code>[Re, Im]</code> 2-vector; the complex MLP outputs
+      a native complex tensor (paired real / imaginary halves).
+      <strong>Per-family loss menus</strong>:
+    </p>
+    <ul>
+      <li><strong>Real MLP</strong> — <code>mse</code>,
+        <code>smooth_l1</code>, <code>eps_rel_mse</code>: shape-agnostic
+        residuals on the packed <code>[Re, Im]</code> tensor.</li>
+      <li><strong>Complex MLP</strong> — <code>mse</code>,
+        <code>smooth_l1</code>, or <code>physics_forward</code>:
+        <code>mse</code> / <code>smooth_l1</code> dispatch through the
+        model-aware loss factory to the complex kernels
+        (<code>complex_mse_loss</code> / <code>complex_smooth_l1_loss</code>);
+        <code>physics_forward</code> is now a <em>hybrid</em>
+        <code>L = base + λ·NRW_residual</code> with the base term
+        being <code>complex_mse_loss</code> and λ sampled from
+        <code>log [1e-3, 1]</code>.</li>
+    </ul>
+
+    <h3 style="margin-top:0.5rem">EpsRelMse — the variance-crusher loss (shipped default for both pipelines)</h3>
+    <p>
+      MSE on packed <code>[Re, Im]</code> tensors weights every sample
+      by the magnitude of its absolute residual: bulk samples
+      (<code>|ε| ≈ 30</code>) contribute the lion's share of the
+      gradient and the singular corner (<code>|ε| ≈ 1.5</code>) is
+      almost invisible. EpsRelMse divides each squared residual by
+      <code>|ε|²</code> after the target scaler's inverse
+      transform, so a 1 % relative miss contributes the same loss
+      whether the target is 1.5 or 30. Effect at training time
+      (Stage 2 of the stack above): cross-seed standard deviation
+      on the worst sample's relative error collapses from ≈10 pp
+      to ≈0.07 pp — the optimiser literally minimises the reported
+      metric. Both pipelines ship this loss as the default;
+      <code>physics_forward</code> and <code>smooth_l1</code> stay
+      available in the HPO menu.
+    </p>
+
+    <div class="math real">REAL MLP — shape-agnostic losses
+
+MSE  — mean squared error:
+  Real:    L = 𝔼[ (ε̂ − ε)² ]              ← on packed [Re, Im]
+
+Smooth L1 / Huber  (β = 1.0):
+       ½·Δ² / β       if |Δ| &lt; β
+  L =
+       |Δ| − β/2     otherwise
+  Δ = ε̂ − ε   (per component)
+
+EpsRelMse  — squared relative error, scale-aware (shipped default):
+  L = 𝔼[ |ε̂ − ε|² / |ε|² ]
+  Both sides inverse-transformed through the fitted target scaler
+  so the ratio lives in physical data-space.  The dataset enforces
+  ε' ≥ 1, so |ε| ≥ 1 and the denominator never approaches zero —
+  no floor on the divisor is needed.</div>
+
+    <h3 style="margin-top:0.75rem">Physics-forward — the Complex MLP loss</h3>
+
+    <p>
+      The Complex MLP is tasked with the <em>inverse</em>
+      <code>S → ε</code> problem, but the <em>forward</em>
+      <code>ε → S</code> problem has a closed-form solution:
+      the Nicolson-Ross-Weir (NRW) transfer-matrix formulae for a
+      non-magnetic sample in a rectangular waveguide (see the NRW
+      section above). That gives us a directly differentiable way to
+      ask "does the predicted ε̂ actually produce the measured
+      S-parameters?" — which is exactly what we want the network to
+      optimise for.
+    </p>
+
+    <p>
+      Instead of scoring the prediction in ε-space (where MAPE / phase
+      / scale trade-offs had to be hand-designed across multiple
+      iterations), we push the prediction through the forward model
+      and measure the residual in S-parameter space, where the physics
+      already defines the right geometry.
+    </p>
+
+    <h4 style="margin:0.7rem 0 0.3rem; font-size:13px; color:#6d28d9;">
+      What is NRW_stable?
+    </h4>
+    <p>
+      <code>NRW_stable</code> is the <em>physics kernel</em> — a
+      pure-Rust, fully differentiable implementation of the
+      <strong>direct (forward) NRW problem</strong>:
+      given a permittivity ε and the waveguide geometry, return the
+      S-parameters a vector network analyser would measure.
+      It is the source of truth for both <em>data generation</em>
+      (the synthetic training set is produced by sweeping ε through
+      this kernel) and the <em>physics-forward loss</em> below
+      (the predicted ε̂ is pushed through the same kernel and
+      compared against the measured S in S-parameter space).
+    </p>
+    <div class="math complex">NRW direct problem (the kernel called NRW_stable)
+
+  Inputs:
+    ε       — relative permittivity ε = ε′ − jε″
+    f       — operating frequency
+    a       — waveguide width (WR-90 → 22.86 mm)
+    d       — sample thickness (default 1.5 mm)
+
+  1. Cutoff &amp; propagation constants:
+       λ_c     = 2·a                              (TE10 cutoff wavelength)
+       γ_air   = (2π/c)·√( (c/2a)² − f² )         (air, evanescent below cutoff)
+       γ_mut   = (2π/c)·√( (c/2a)² − ε·f² )       (sample, ε-dependent)
+
+  2. Reflection coefficient at the air ↔ MUT interface:
+       Γ       = (γ_air − γ_mut) / (γ_air + γ_mut)
+
+  3. Transmission factor through the slab:
+       T       = exp( −γ_mut · d )
+
+  4. Two-port S-parameters of the loaded slab:
+       S₁₁    = Γ·(1 − T²) / (1 − Γ²·T²)
+       S₂₁    = T·(1 − Γ²) / (1 − Γ²·T²)
+
+  Outputs:  (S₁₁, S₂₁)         ← what the VNA would measure
+
+The "stable" suffix refers to the backward gradient: the standard
+principal-sqrt has a 1/√0 pole at the vacuum boundary (ε ≈ 1 + 0j)
+that would NaN the physics-loss gradient. NRW_stable rewrites the
+sqrt for inputs with Re(z) ≥ 0 as
+  (u, v) = ( √((|z|+a)/2),  b/(2u) )
+which is algebraically equivalent in the forward pass but bounded
+in backward — always on for the physics-forward path.</div>
+
+    <p>
+      The inverse problem (S → ε) the network solves is the
+      hand-pickable inversion of those four steps; the
+      <em>direct</em> problem above is closed-form, single-branch,
+      and trivially differentiable, which is exactly why we use it
+      both to generate training data and to score predictions in
+      S-space:
+    </p>
+
+    <div class="math complex">Physics-forward (hybrid PINN) loss
+
+  (Ŝ₁₁, Ŝ₂₁)  =  NRW_stable(ε̂; waveguide, f)         ← stable-sqrt path
+  (S₁₁, S₂₁)  =  NRW_stable(ε;  waveguide, f)         (always-on default)
+
+  L_phys = 𝔼[ |Ŝ₁₁ − S₁₁|² + |Ŝ₂₁ − S₂₁|² ]           ← complex MSE in S-space
+  L_base = complex_mse(ε̂, ε)                           ← residual in ε-space
+
+  L_Total  =  L_base  +  λ · L_phys                    ← hybrid mixing
+
+λ ∈ log [1e-3, 1]  — sampled per HPO trial, default 1e-3 in /train.
+
+waveguide: WR-90 (a = 22.86 mm, d = 1.5 mm) by default
+f        : operating frequency (8.2 GHz by default)
+
+Default geometry matches the dataset generator's defaults — so a
+training run on a default-generated dataset reconstructs exactly
+the S-parameters the dataset was built from. The NRW backward
+path uses a stable-sqrt formulation so gradients are bounded at
+the vacuum boundary (ε ≈ 1 + 0j), where the standard
+principal-sqrt has a 1/√0 pole that would NaN the physics-loss
+gradient.</div>
+
+    <p class="small-note">
+      Implementation notes: data generation is deterministic and
+      noise-free, so <code>NRW(ε)</code> reproduces the stored S
+      exactly — <code>NRW(ε̂) − NRW(ε) = Ŝ − S</code> up to FP
+      rounding. The graph is fully differentiable; |S| ≤ 1 by
+      passivity so the loss is self-bounded. Both ε̂ and ε are
+      inverse-transformed through the fitted target scaler before
+      the forward pass. λ is the single mixing scalar (HPO-sampled
+      from log [1e-3, 1]; default 1e-3 in /train).
+    </p>
+  </div>
+
+  <!-- ═══════════════════ DATA PIPELINE ═══════════════════ -->
+  <div class="card arch-card" id="sec-data">
+    <h2>Data pipeline — generation, scaling, batching</h2>
+
+    <p>
+      Every trial sees the same three splits (<em>train / val / test</em>)
+      in the same order. The <em>/generate</em> workflow samples ε′/ε″
+      from the configured range, runs the NRW <em>forward</em> model to
+      produce (S<sub>11</sub>, S<sub>21</sub>), and writes one row per
+      sample. The splits are persisted and re-used across every
+      training and HPO run on the same dataset.
+    </p>
+
+    <div class="two-col">
+      <div class="math real">INPUT SCALING  (StandardScaler on train split)
+
+Fit on the training features only, then transform all three splits:
+  μ       = mean(train_features)
+  σ       = std(train_features) + 1e-12     ← zero-σ guard
+  x_std   = (x − μ) / σ
+
+Targets use the SAME StandardScaler recipe. EpsRelMse runs
+`scaler.inverse_transform(·)` before dividing by |target| so
+the ratio lives in physical data-space; MSE and Smooth L1
+operate directly on the scaled tensors because their
+residual is scale-equivariant.</div>
+
+      <div class="math complex">BATCHING & SHUFFLING
+
+  batch size  ∈ {8, 16, 32, 64, 128, 256, 512, ALL}
+  DataLoader  iterates `ceil(n / batch_size)` batches/epoch.
+  Shuffle seed pins the ChaCha8 RNG; HPO pins every trial to
+  the study's base seed so each trial sees the same batch order.
+  `ALL` disables mini-batching — one step per epoch, full-grad.
+
+Determinism
+  All randomness (shuffling, init, dropout masks, input
+  noise) flows through a single seeded ChaCha8 stream. Fixed
+  seed ⇒ bit-for-bit reproducible forward & backward pass.</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ TRAINING LOOP ═══════════════════ -->
+  <div class="card arch-card" id="sec-train">
+    <h2>Training loop — warmup, early stopping, LR schedule</h2>
+
+    <p>
+      Each epoch streams the train split, evaluates on val, then
+      lets the val metric drive both <em>early stopping</em> and
+      the <em>best-weight snapshot</em> that gets restored at end
+      of training.
+    </p>
+
+    <div class="math real">pseudocode (one epoch):
+  for (x, y) in train_loader:
+      ŷ     = model.forward(add_gaussian_noise(x, σ), train=True)
+      grads = loss_fn(ŷ, y).backward()
+      if max_grad_norm: clip_grad_norm_stable(grads, vars, max_grad_norm)
+      optimizer.step(grads)                              ← weight decay here
+  val_loss = evaluate(model, val_loader)                 ← no dropout / no noise
+  lr_scheduler.step(epoch, val_loss)
+  best_weights = snapshot if val_loss improved
+  early_stop if (epoch − best_epoch) ≥ patience and epoch ≥ warmup_epochs
+  on exit: model.vars ← best_weights                     ← restore-best</div>
+
+    <p class="small-note">
+      <strong>Warmup</strong> blocks early-stopping for the first
+      N epochs so an unlucky initial loss spike can't kill the run.
+      <strong>Patience</strong> halts training after that many
+      post-warmup epochs without val-loss improvement; the trainer
+      then restores the best-val-loss snapshot, not the last epoch.
+    </p>
+
+    <h3 style="margin-top:0.7rem">LR schedulers</h3>
+    <div class="math real">COSINE (default):  η(t) = η_min + ½·(η₀ − η_min)·(1 + cos(π · t / T))
+PLATEAU:           η ← max(η · plateau_factor, plateau_min_lr)  on val-loss stall
+NONE:              η ≡ η₀</div>
+  </div>
+
+  <!-- ═══════════════════ OPTIMIZERS ═══════════════════ -->
+  <div class="card arch-card" id="sec-opt">
+    <h2>Optimizers</h2>
+
+    <p>
+      Four optimizers sampled by HPO; all work on both Real and
+      Complex pipelines. <strong>AdamW</strong> (default) applies
+      decoupled weight decay and is the production pick. The other
+      three —
+      <code>adam</code> (L2 folded into the gradient),
+      <code>sgd</code> (optional momentum / Nesterov),
+      <code>rmsprop</code> (EMA of squared grads) — stay in the
+      menu so HPO can sample alternatives. <code>sgd</code> and
+      <code>rmsprop</code> open conditional sub-knobs (momentum,
+      Nesterov, α) when picked.
+    </p>
+  </div>
+
+  <!-- ═══════════════════ HPO & METRICS ═══════════════════ -->
+  <div class="card arch-card" id="sec-hpo">
+    <h2>HPO — NSGA-III, Pareto front, fANOVA</h2>
+
+    <p>
+      <strong>Both pipelines</strong> (Real and Complex) use the
+      same custom <strong>NSGA-III</strong> sampler with the same
+      three objectives — there is one HPO loop in the program, not
+      one per family. NSGA-III maintains a population over the
+      search space and selects trials using dominance + reference-
+      point niching after every completed evaluation. (NSGA-II via
+      Optuna appears in the Python ↔ Rust migration benchmark only,
+      as the historical Python baseline; production HPO does not
+      use it.)
+    </p>
+
+    <div class="math real">OBJECTIVES  (vector-valued, evaluated on the perturbed test grid):
+  1.  OK@1%        — MAXIMISE     fraction of samples with relative error &lt; 1 %
+  2.  param_count  — MINIMISE     total real-valued learnable parameters
+  3.  max_error    — MINIMISE     worst-sample relative error (%)
+
+Dominance:
+  trial A dominates B iff A ≥ B on every objective AND A &gt; B on at least one.
+  Pareto front = the set of non-dominated trials after the study ends.</div>
+
+    <p>
+      A per-trial <em>feasibility</em> flag (✓/✗ in the HPO tables)
+      flags crashed / diverged / NaN trials so dominance only counts
+      trials that actually trained.
+    </p>
+
+    <h3>Parameter importance — fANOVA vs Spearman</h3>
+    <p>
+      After the study ends, each hyperparameter's variance share
+      per objective is decomposed by <strong>fANOVA</strong>
+      (default, ≤ 2k trials — random-forest main-effect shares plus
+      a grey "interactions" residual that sums to 100 %) or by
+      <strong>Spearman rank correlation</strong> (fallback for
+      larger studies — no interactions term, but cheap to compute).
+    </p>
+  </div>
+
+  <!-- ═══════════════════ METRICS ═══════════════════ -->
+  <div class="card arch-card" id="sec-metrics">
+    <h2>Metrics — what the numbers mean</h2>
+
+    <div class="math real">RELATIVE ERROR  (per test sample):
+  r_i = |ε̂_i − ε_i| / |ε_i|
+  (the dataset enforces ε' ≥ 1, so |ε_i| ≥ 1 — no floor on the divisor)
+
+OK@τ  (top-line metric, τ ∈ {1%, 10%}):
+  OK@τ = (1/N) · |{ i : r_i &lt; τ }|  · 100   %
+
+MAX ERROR  (worst-case relative error):
+  max_error = 100 · max_i r_i
+
+MEAN ERROR:
+  mean_error = (100/N) · Σ r_i
+
+R²  (per real/imag component):
+  R²_re = 1 − Σ(Re(ε̂_i) − Re(ε_i))²  /  Σ(Re(ε_i) − mean(Re(ε)))²
+  R²_im analogous on the imaginary component.</div>
+
+    <p>
+      <strong>OK@1 %</strong> is the primary metric;
+      <strong>max_error</strong> is the blow-up catcher (one sample
+      at 300 % can sink a deployment regardless of bulk OK@1);
+      <strong>param_count</strong> is the deployment knob (smaller
+      networks are cheaper at inference and usually preferred over
+      marginally-better-accuracy ones at the Pareto front).
+      Relative error uses the magnitude of the complex difference,
+      |ε̂ − ε| / |ε|, not per-component.
+    </p>
+  </div>
+
+  <!-- ═══════════════════ REPRODUCIBILITY ═══════════════════ -->
+  <div class="card arch-card" id="sec-repro">
+    <h2>Reproducibility &amp; determinism</h2>
+
+    <p>
+      All stochastic ops (init, shuffle, dropout, input noise) draw
+      from a single seeded <em>ChaCha8</em> stream. Same
+      <code>seed</code> + <code>shuffle_seed</code> ⇒ bit-identical
+      weights across runs (covers forward, backward, dropout, noise,
+      grad clipping). Each HPO trial uses
+      <code>study_seed + trial_number</code> so retraining a trial
+      from the HPO page reproduces its <code>max_error</code> bit-
+      for-bit. Gradient clipping sums squared grad norms in a
+      deterministic parameter order so the global norm is
+      permutation-invariant.
+    </p>
+  </div>
+</div>
+{% endblock %}

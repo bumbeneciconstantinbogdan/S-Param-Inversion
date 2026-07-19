@@ -1,0 +1,15 @@
+[package]
+name = "sparam-physics"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+sparam-core = { workspace = true }
+candle-core = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+num-complex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }

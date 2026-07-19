@@ -1,0 +1,21 @@
+<div class="card" style="border-color:#16a34a; background:#f0fdf4;">
+  <h2 class="success">Training Complete — {{ run.model_name }}</h2>
+  <div class="metrics-row" style="margin-top:0.75rem;">
+    <div class="metric-box">
+      <div class="metric">{{ run.status }}</div>
+      <div class="metric-label">Status</div>
+    </div>
+    {% match run.best_epoch %}{% when Some with (e) %}
+    <div class="metric-box">
+      <div class="metric">{{ e }}</div>
+      <div class="metric-label">Best Epoch</div>
+    </div>
+    {% when None %}{% endmatch %}
+    {% match run.training_time_secs %}{% when Some with (t) %}
+    <div class="metric-box">
+      <div class="metric">{{ t }}s</div>
+      <div class="metric-label">Duration</div>
+    </div>
+    {% when None %}{% endmatch %}
+  </div>
+</div>

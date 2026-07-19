@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Evaluate Model{% endblock %}
+{% block content %}
+<h1>Evaluate Model</h1>
+
+<div class="card" style="margin-bottom:0.75rem; color:#475569;">
+  Need to inspect the closed-form NRW failure region without training a model first?
+  <a href="/evaluate/nrw"><strong>Run analytical NRW round-trip &rarr;</strong></a>
+</div>
+
+{% if runs.is_empty() %}
+<div class="card" style="color:#64748b; text-align:center; padding:2rem;">
+  No completed training runs. <a href="/train">Train a model first</a>,
+  or <a href="/evaluate/nrw">evaluate the analytical NRW algorithm</a>
+  on a permittivity grid (no model needed).
+</div>
+{% else %}
+<div class="card">
+  <form hx-post="/evaluate" hx-target="#eval-result" hx-swap="innerHTML">
+    <label for="run_id">Trained model (training run)</label>
+    <select name="run_id" id="run_id">
+      {% for r in runs %}
+      <option value="{{ r.id }}">Run #{{ r.id }} — {{ r.model_name }} ({{ r.created_at }})</option>
+      {% endfor %}
+    </select>
+
+    <label for="dataset_id" style="margin-top:0.75rem">Evaluate on dataset</label>
+    <select name="dataset_id" id="dataset_id">
+      <option value="">— Use the model&rsquo;s training dataset (default) —</option>
+      {% for d in datasets %}
+      <option value="{{ d.id }}">Dataset #{{ d.id }} — train {{ d.train_samples }} / val {{ d.val_samples }} / test {{ d.test_samples }} ({{ d.created_at }})</option>
+      {% endfor %}
+    </select>
+    <p class="hint" style="font-size:0.85rem; color:#64748b; margin:0.25rem 0 0">
+      Pick a different dataset to stress-test how the model generalises.
+      Scaler statistics always come from the model&rsquo;s original training data,
+      so the chosen dataset can have any sampling density &mdash; the comparison
+      stays apples-to-apples.
+    </p>
+
+    <div style="margin-top:0.75rem;">
+      <label for="apply_refinement"
+             style="display:inline-flex; gap:0.5rem; align-items:center; cursor:pointer; margin:0;">
+        <input type="checkbox" id="apply_refinement" name="apply_refinement" value="1">
+        <span>Apply final NRW optimization stage</span>
+      </label>
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="margin-top:0.75rem">Evaluate</button>
+  </form>
+</div>
+{% endif %}
+
+<div id="eval-result"></div>
+{% endblock %}

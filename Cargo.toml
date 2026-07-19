@@ -1,0 +1,88 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/physics",
+    "crates/models",
+    "crates/data",
+    "crates/training",
+    "crates/hpo",
+    "crates/app",
+    "crates/web",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+# Internal crates
+sparam-core = { path = "crates/core" }
+sparam-physics = { path = "crates/physics" }
+sparam-models = { path = "crates/models" }
+sparam-data = { path = "crates/data" }
+sparam-training = { path = "crates/training" }
+sparam-hpo = { path = "crates/hpo" }
+sparam-app = { path = "crates/app" }
+sparam-web = { path = "crates/web" }
+
+# Core ML & Math
+candle-core = { version = "0.10.2", features = ["accelerate"] }
+candle-nn = "0.10.2"
+safetensors = "0.7"
+
+# CLI
+clap = { version = "4.6.1", features = ["derive", "env"] }
+
+# RNG
+rand = "0.10.1"
+rand_chacha = "0.10.0"
+
+# Parallelism
+rayon = "1.12.0"
+
+# HPO
+optimizer = { version = "1.0", features = ["derive", "serde"] }
+
+# Data & Serialization
+csv = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_urlencoded = "0.7"
+toml = "1.1.2"
+
+# Storage (optional)
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+
+# Error handling
+thiserror = "2"
+
+# Web server
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1.52.1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+askama = "0.16.0"
+rust-embed = "8"
+tower-http = { version = "0.6", features = ["compression-br", "set-header"] }
+mime_guess = "2"
+
+# Dev dependencies
+criterion = { version = "0.8.2", features = ["html_reports", "cargo_bench_support"] }
+tempfile = "3"
+approx = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Numerics run at near-release speed even in `cargo run` (dev profile).
+# opt-level=1 for workspace code: fast compile, ~5-10× faster than debug.
+# opt-level=2/3 for dependencies: full speed for BLAS, autograd, HPO sampler.
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev.package.candle-core]
+opt-level = 3
+[profile.dev.package.candle-nn]
+opt-level = 3

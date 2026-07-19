@@ -1,0 +1,32 @@
+[package]
+name = "sparam-app"
+edition.workspace = true
+version.workspace = true
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:toml"]
+bench-utils = []
+
+[dependencies]
+sparam-core = { workspace = true, features = ["cli"] }
+sparam-physics = { workspace = true }
+sparam-models = { workspace = true }
+sparam-data = { workspace = true }
+sparam-training = { workspace = true }
+sparam-hpo = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+optimizer = { workspace = true }
+csv = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+rayon = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+serde_urlencoded = { workspace = true }
+tempfile = { workspace = true }
