@@ -127,10 +127,19 @@ The model is evaluated using **Relative Local Error** and **Strict Accuracy** (O
 
 ## License & Citation
 
-This project is open-source. If you use this code or methodology in your research, please cite the associated paper (once will be published):
+This project is open-source. If you use this code or methodology in your research, please cite the associated paper:
 
 ```bibtex
-@article{}
+@article{Bumbeneci2026IJAEM,
+  author    = {Bumbeneci, Bogdan and B\u{a}rbulescu, Ruxandra and
+               Duca, Anton and Ciuprina, Gabriela},
+  title     = {Neural network alternative to the {NRW} algorithm for complex permittivity
+               extraction of non-magnetic materials at microwave frequencies},
+  journal   = {International Journal of Applied Electromagnetics and Mechanics},
+  year      = {2026},
+  note      = {in press},
+  doi       = {10.1177/13835416261428290}
+}
 ```
 
 For questions, issues, or contributions, please open an Issue or Pull Request on GitHub.
