@@ -3,7 +3,8 @@
 .DS_Store
 target
 poster
-#report
+report
+manuscript
 # Large database files - use git-lfs or manage locally
 sparam_data/*.db
 sparam_data/*.db-shm
